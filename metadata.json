@@ -1,0 +1,6 @@
+{
+  "name": "OmniStore Pro Commerce",
+  "description": "Professional e-commerce platform with tokenized secure payment gateway, atomic checkout validation, and live real-time inventory tracking across distributed warehouses.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
