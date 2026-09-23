@@ -126,7 +126,7 @@ export const CartDrawer: React.FC = () => {
                 </button>
               </div>
             ) : (
-              cart.map((item) => {
+              cart.map((item, index) => {
                 const isItemLowStock = item.product.stock <= item.product.lowStockThreshold;
 
                 return (

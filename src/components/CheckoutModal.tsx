@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   X,
@@ -15,13 +15,14 @@ import {
   Copy,
   ExternalLink,
   Sparkles,
-  Smartphone
+  Smartphone,
+  MapPin
 } from 'lucide-react';
 import { useStore } from '../context/StoreContext';
 import { ShippingDetails, PaymentFormState, Order } from '../types';
 
 export const CheckoutModal: React.FC = () => {
-  const { isCheckoutOpen, setIsCheckoutOpen, cart, processCheckout, activeOrder, setActiveOrder, setIsTrackingOpen } = useStore();
+  const { isCheckoutOpen, setIsCheckoutOpen, cart, processCheckout, activeOrder, setActiveOrder, setIsTrackingOpen, userProfile, setIsUserProfileOpen } = useStore();
 
   const [step, setStep] = useState<'shipping' | 'payment' | 'threed_secure' | 'success'>('shipping');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -30,16 +31,37 @@ export const CheckoutModal: React.FC = () => {
   // Shipping State
   const [shipping, setShipping] = useState<ShippingDetails>({
     fullName: 'Alex Vance',
-    email: 'alex.vance@workstation-pro.io',
+    email: 'm99038765@gmail.com',
     phone: '+1 (415) 890-2134',
-    addressLine1: '450 Mission Street, Suite 1200',
-    addressLine2: '',
+    addressLine1: '450 Mission Street',
+    addressLine2: 'Suite 1200',
     city: 'San Francisco',
     state: 'CA',
     postalCode: '94105',
     country: 'United States',
     shippingSpeed: 'standard',
   });
+
+  // Sync shipping details with user profile default address
+  useEffect(() => {
+    if (isCheckoutOpen && userProfile) {
+      const defaultAddr = userProfile.savedAddresses.find(a => a.isDefaultShipping) || userProfile.savedAddresses[0];
+      if (defaultAddr) {
+        setShipping(prev => ({
+          ...prev,
+          fullName: defaultAddr.fullName || userProfile.displayName || `${userProfile.firstName} ${userProfile.lastName}`,
+          email: userProfile.email || prev.email,
+          phone: defaultAddr.phone || userProfile.phone || prev.phone,
+          addressLine1: defaultAddr.addressLine1,
+          addressLine2: defaultAddr.addressLine2 || '',
+          city: defaultAddr.city,
+          state: defaultAddr.state,
+          postalCode: defaultAddr.postalCode,
+          country: defaultAddr.country
+        }));
+      }
+    }
+  }, [isCheckoutOpen, userProfile]);
 
   // Payment Form State
   const [payment, setPayment] = useState<PaymentFormState>({
@@ -272,6 +294,69 @@ export const CheckoutModal: React.FC = () => {
             {/* STEP 1: SHIPPING */}
             {step === 'shipping' && (
               <form onSubmit={handleShippingSubmit} className="space-y-4">
+                {/* Saved Addresses Quick Selection */}
+                {userProfile?.savedAddresses && userProfile.savedAddresses.length > 0 && (
+                  <div className="p-3.5 rounded-2xl bg-neutral-900/90 border border-neutral-800 space-y-2">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-semibold text-white flex items-center gap-1.5">
+                        <MapPin className="w-3.5 h-3.5 text-emerald-400" />
+                        Saved Addresses ({userProfile.savedAddresses.length})
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsUserProfileOpen(true);
+                        }}
+                        className="text-[11px] text-emerald-400 hover:underline cursor-pointer"
+                      >
+                        Manage Addresses →
+                      </button>
+                    </div>
+
+                    <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pt-1">
+                      {userProfile.savedAddresses.map((addr) => {
+                        const isSelected = shipping.addressLine1 === addr.addressLine1 && shipping.postalCode === addr.postalCode;
+                        return (
+                          <button
+                            key={addr.id}
+                            type="button"
+                            onClick={() => {
+                              setShipping(prev => ({
+                                ...prev,
+                                fullName: addr.fullName,
+                                phone: addr.phone || prev.phone,
+                                addressLine1: addr.addressLine1,
+                                addressLine2: addr.addressLine2 || '',
+                                city: addr.city,
+                                state: addr.state,
+                                postalCode: addr.postalCode,
+                                country: addr.country
+                              }));
+                            }}
+                            className={`px-3 py-2 rounded-xl text-left border transition-all cursor-pointer shrink-0 text-xs ${
+                              isSelected
+                                ? 'bg-emerald-500/15 border-emerald-500/50 text-white shadow-sm shadow-emerald-500/10'
+                                : 'bg-neutral-950/60 border-neutral-800 text-neutral-400 hover:text-white hover:border-neutral-700'
+                            }`}
+                          >
+                            <div className="font-semibold flex items-center gap-1.5">
+                              <span>{addr.label}</span>
+                              {addr.isDefaultShipping && (
+                                <span className="text-[9px] px-1 py-0.2 rounded bg-emerald-500/20 text-emerald-400 font-mono">
+                                  Default
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[10px] text-neutral-400 mt-0.5 truncate max-w-[200px]">
+                              {addr.addressLine1}, {addr.city}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
                 <div className="flex items-center justify-between">
                   <h4 className="text-xs font-semibold uppercase tracking-wider text-neutral-300">
                     Recipient Logistics & Delivery Point

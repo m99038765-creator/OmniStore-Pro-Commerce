@@ -3,8 +3,14 @@ import http from 'http';
 import path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer as createViteServer } from 'vite';
+import { GoogleGenAI } from '@google/genai';
 import { INITIAL_PRODUCTS } from './src/data/initialProducts';
-import { Product, Order, RealtimeMessage, ShippingDetails, PaymentFormState } from './src/types';
+import { INITIAL_SKU_AUDIT_LOGS, getAuditLogsForSku } from './src/data/initialAuditLogs';
+import { Product, Order, RealtimeMessage, ShippingDetails, PaymentFormState, SkuAuditLogEntry, ProductReview } from './src/types';
+import { calculateSkuAiSuggestions, calculateCategoryDepletionReport } from './src/utils/aiSkuSuggestionEngine';
+
+let _serverIdCounter = 0;
+const _getUniqueServerId = (prefix = "id") => `${prefix}_${Date.now()}_${++_serverIdCounter}`;
 
 const app = express();
 const server = http.createServer(app);
@@ -15,6 +21,7 @@ app.use(express.json());
 // In-memory server-authoritative store
 let inventory: Product[] = JSON.parse(JSON.stringify(INITIAL_PRODUCTS));
 let orders: Order[] = [];
+let skuAuditLogs: SkuAuditLogEntry[] = JSON.parse(JSON.stringify(INITIAL_SKU_AUDIT_LOGS));
 const reservations = new Map<string, { productId: string; quantity: number; expiresAt: number }>();
 
 // WebSocket Server
@@ -135,6 +142,113 @@ app.get('/api/products/:id', (req, res) => {
   res.json(product);
 });
 
+// Get reviews for a product
+app.get('/api/products/:id/reviews', (req, res) => {
+  const product = inventory.find(p => p.id === req.params.id);
+  if (!product) {
+    return res.status(404).json({ error: 'Product not found' });
+  }
+  res.json({
+    productId: product.id,
+    rating: product.rating,
+    reviewCount: product.reviewCount,
+    reviews: product.reviews || []
+  });
+});
+
+// Post a review for a product
+app.post('/api/products/:id/reviews', (req, res) => {
+  const { authorName, rating, title, comment, location } = req.body;
+  const product = inventory.find(p => p.id === req.params.id);
+  if (!product) {
+    return res.status(404).json({ error: 'Product not found' });
+  }
+
+  const numRating = Number(rating);
+  if (!authorName || typeof authorName !== 'string' || !authorName.trim()) {
+    return res.status(400).json({ error: 'Author name is required' });
+  }
+  if (isNaN(numRating) || numRating < 1 || numRating > 5) {
+    return res.status(400).json({ error: 'Rating must be an integer between 1 and 5' });
+  }
+  if (!comment || typeof comment !== 'string' || !comment.trim()) {
+    return res.status(400).json({ error: 'Review comment is required' });
+  }
+
+  const newReview: ProductReview = {
+    id: _getUniqueServerId('rev'),
+    productId: product.id,
+    authorName: authorName.trim(),
+    rating: Math.round(numRating),
+    title: title ? String(title).trim() : undefined,
+    comment: comment.trim(),
+    createdAt: new Date().toISOString(),
+    verifiedPurchase: true,
+    helpfulCount: 0,
+    location: location ? String(location).trim() : undefined,
+  };
+
+  if (!product.reviews) {
+    product.reviews = [];
+  }
+  product.reviews.unshift(newReview);
+
+  // Recalculate average rating & review count
+  const totalStars = product.reviews.reduce((sum, r) => sum + r.rating, 0);
+  product.rating = Number((totalStars / product.reviews.length).toFixed(1));
+  product.reviewCount = product.reviews.length;
+
+  // Broadcast real-time review addition
+  broadcast({
+    type: 'review:add',
+    payload: {
+      productId: product.id,
+      review: newReview,
+      rating: product.rating,
+      reviewCount: product.reviewCount
+    },
+    timestamp: new Date().toISOString()
+  });
+
+  res.status(201).json({
+    success: true,
+    review: newReview,
+    product: {
+      id: product.id,
+      rating: product.rating,
+      reviewCount: product.reviewCount,
+      reviews: product.reviews
+    }
+  });
+});
+
+// Vote a review as helpful
+app.post('/api/products/:id/reviews/:reviewId/vote', (req, res) => {
+  const product = inventory.find(p => p.id === req.params.id);
+  if (!product || !product.reviews) {
+    return res.status(404).json({ error: 'Product or reviews not found' });
+  }
+
+  const review = product.reviews.find(r => r.id === req.params.reviewId);
+  if (!review) {
+    return res.status(404).json({ error: 'Review not found' });
+  }
+
+  review.helpfulCount = (review.helpfulCount || 0) + 1;
+
+  broadcast({
+    type: 'review:vote',
+    payload: {
+      productId: product.id,
+      reviewId: review.id,
+      helpfulCount: review.helpfulCount
+    },
+    timestamp: new Date().toISOString()
+  });
+
+  res.json({ success: true, helpfulCount: review.helpfulCount });
+});
+
 // Reserve inventory for active checkout
 app.post('/api/checkout/reserve', (req, res) => {
   const { items } = req.body as { items: { productId: string; quantity: number }[] };
@@ -142,7 +256,7 @@ app.post('/api/checkout/reserve', (req, res) => {
     return res.status(400).json({ error: 'Invalid items array' });
   }
 
-  const reservationId = 'res_' + Math.random().toString(36).substring(2, 10);
+  const reservationId = _getUniqueServerId("res");
   const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
 
   for (const item of items) {
@@ -323,7 +437,7 @@ app.post('/api/checkout/process-payment', (req, res) => {
   const deliveryDate = new Date(Date.now() + estimatedDays * 24 * 60 * 60 * 1000);
 
   const newOrder: Order = {
-    id: 'ord_' + Math.random().toString(36).substring(2, 12),
+    id: _getUniqueServerId("ord"),
     orderNumber: orderNum,
     trackingNumber: trackingNum,
     createdAt: new Date().toISOString(),
@@ -345,7 +459,7 @@ app.post('/api/checkout/process-payment', (req, res) => {
       method: paymentDetails.method,
       cardBrand,
       last4,
-      transactionId: 'txn_' + Math.random().toString(36).substring(2, 14),
+      transactionId: _getUniqueServerId("txn"),
       authorizationCode: 'AUTH_' + Math.floor(100000 + Math.random() * 900000),
       status: 'paid'
     },
@@ -445,7 +559,28 @@ app.post('/api/inventory/restock', (req, res) => {
   }
 
   const addQty = Math.max(1, Number(quantity) || 5);
+  const prevStock = prod.stock;
   prod.stock += addQty;
+
+  // Record audit log entry
+  const restockAuditEntry: SkuAuditLogEntry = {
+    id: _getUniqueServerId("audit"),
+    sku: prod.sku,
+    productId: prod.id,
+    productName: prod.name,
+    timestamp: new Date().toISOString(),
+    adjustmentValue: addQty,
+    adjustmentType: 'restock',
+    previousStock: prevStock,
+    newStock: prod.stock,
+    operatorId: 'OP-8821 (J. Vance)',
+    operatorName: 'Julian Vance - Senior Floor Specialist',
+    reason: 'Instant Manual Restock Action',
+    warehouse: prod.warehouse,
+    batchNumber: `RESTOCK-${Date.now().toString().slice(-6)}`,
+    notes: `Manual inventory replenishment (+${addQty} units).`
+  };
+  skuAuditLogs.unshift(restockAuditEntry);
 
   broadcast({
     type: 'inventory:update',
@@ -474,6 +609,239 @@ app.post('/api/inventory/restock', (req, res) => {
     success: true,
     product: prod
   });
+});
+
+// Admin: Batch adjust inventory stock levels across multiple SKUs
+app.post('/api/inventory/batch-adjust', (req, res) => {
+  const {
+    productIds,
+    adjustmentType,
+    quantity,
+    reason
+  } = req.body as {
+    productIds: string[];
+    adjustmentType: 'add' | 'subtract' | 'set';
+    quantity: number;
+    reason?: string;
+  };
+
+  if (!Array.isArray(productIds) || productIds.length === 0) {
+    return res.status(400).json({ error: 'No product SKUs selected for batch update.' });
+  }
+
+  const qty = Number(quantity);
+  if (isNaN(qty) || qty < 0) {
+    return res.status(400).json({ error: 'Invalid adjustment quantity.' });
+  }
+
+  const updatedProducts: typeof inventory = [];
+  const adjustmentDeltas: { productId: string; sku: string; name: string; oldStock: number; newStock: number; delta: number }[] = [];
+
+  for (const pid of productIds) {
+    const prod = inventory.find(p => p.id === pid || p.sku === pid);
+    if (!prod) continue;
+
+    const oldStock = prod.stock;
+    let newStock = oldStock;
+
+    if (adjustmentType === 'add') {
+      newStock = oldStock + qty;
+    } else if (adjustmentType === 'subtract') {
+      newStock = Math.max(0, oldStock - qty);
+    } else if (adjustmentType === 'set') {
+      newStock = Math.max(0, qty);
+    }
+
+    prod.stock = newStock;
+    updatedProducts.push(prod);
+    adjustmentDeltas.push({
+      productId: prod.id,
+      sku: prod.sku,
+      name: prod.name,
+      oldStock,
+      newStock,
+      delta: newStock - oldStock
+    });
+
+    // Broadcast individual real-time inventory updates so all clients update synchronously
+    broadcast({
+      type: 'inventory:update',
+      payload: {
+        productId: prod.id,
+        stock: prod.stock,
+        reserved: prod.reserved,
+        available: prod.stock - prod.reserved
+      },
+      timestamp: new Date().toISOString()
+    });
+
+    if (prod.stock <= prod.lowStockThreshold) {
+      broadcast({
+        type: 'inventory:alert',
+        payload: {
+          productId: prod.id,
+          productName: prod.name,
+          stock: prod.stock,
+          level: prod.stock === 0 ? 'out_of_stock' : 'low_stock',
+          message: prod.stock === 0
+            ? `ALERT: "${prod.name}" (${prod.sku}) has officially SOLD OUT!`
+            : `WARNING: "${prod.name}" (${prod.sku}) is now at low stock (${prod.stock} left)!`
+        },
+        timestamp: new Date().toISOString()
+      });
+    }
+  }
+
+  const actionText =
+    adjustmentType === 'add'
+      ? `added +${qty} units each`
+      : adjustmentType === 'subtract'
+      ? `reduced by -${qty} units each`
+      : `set to exactly ${qty} units`;
+
+  broadcast({
+    type: 'inventory:alert',
+    payload: {
+      level: 'restocked',
+      message: `BATCH UPDATE: Successfully ${actionText} across ${updatedProducts.length} SKUs.`
+    },
+    timestamp: new Date().toISOString()
+  });
+
+  // Record audit log entry for each adjusted SKU
+  for (const delta of adjustmentDeltas) {
+    const batchAuditEntry: SkuAuditLogEntry = {
+      id: _getUniqueServerId("audit"),
+      sku: delta.sku,
+      productId: delta.productId,
+      productName: delta.name,
+      timestamp: new Date().toISOString(),
+      adjustmentValue: delta.delta,
+      adjustmentType: adjustmentType === 'add' ? 'add' : adjustmentType === 'subtract' ? 'subtract' : 'set',
+      previousStock: delta.oldStock,
+      newStock: delta.newStock,
+      operatorId: 'OP-8821 (J. Vance - Console)',
+      operatorName: 'Julian Vance - Senior Floor Specialist',
+      reason: reason || `Batch Stock Adjustment (${adjustmentType})`,
+      warehouse: updatedProducts.find(p => p.sku === delta.sku)?.warehouse || 'Bay Area Hub (WH-01)',
+      batchNumber: `BATCH-${Date.now().toString().slice(-6)}`,
+      notes: `Batch operation applied: ${actionText}`
+    };
+    skuAuditLogs.unshift(batchAuditEntry);
+  }
+
+  res.json({
+    success: true,
+    message: `Batch update successful for ${updatedProducts.length} SKUs (${actionText}).`,
+    updatedCount: updatedProducts.length,
+    adjustmentType,
+    quantity: qty,
+    reason: reason || 'Manual batch inventory adjustment',
+    deltas: adjustmentDeltas
+  });
+});
+
+// GET /api/inventory/audit-logs/:sku - Retrieve recent stock adjustments for a specific SKU
+app.get('/api/inventory/audit-logs/:sku', (req, res) => {
+  const { sku } = req.params;
+  const decodedSku = decodeURIComponent(sku).trim();
+  const prod = inventory.find(p => p.sku.toUpperCase() === decodedSku.toUpperCase());
+
+  let logs = skuAuditLogs.filter(
+    l => l.sku.toUpperCase() === decodedSku.toUpperCase() ||
+         l.sku.replace(/[-\s_]/g, '').toUpperCase() === decodedSku.replace(/[-\s_]/g, '')
+  );
+
+  if (logs.length === 0) {
+    logs = getAuditLogsForSku(decodedSku, prod?.stock || 10, prod?.name || 'Hardware Item');
+    skuAuditLogs.push(...logs);
+  }
+
+  // Sort by timestamp descending (newest first)
+  logs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+  res.json({
+    sku: decodedSku,
+    productId: prod?.id,
+    productName: prod?.name || logs[0]?.productName || 'Hardware Item',
+    currentStock: prod?.stock ?? 0,
+    warehouse: prod?.warehouse || 'Bay Area Hub (WH-01)',
+    logs
+  });
+});
+
+// GET /api/inventory/audit-logs - Query audit logs with optional ?sku=... filter
+app.get('/api/inventory/audit-logs', (req, res) => {
+  const skuQuery = req.query.sku as string | undefined;
+  if (skuQuery) {
+    const decodedSku = decodeURIComponent(skuQuery).trim();
+    const prod = inventory.find(p => p.sku.toUpperCase() === decodedSku.toUpperCase());
+
+    let logs = skuAuditLogs.filter(
+      l => l.sku.toUpperCase() === decodedSku.toUpperCase() ||
+           l.sku.replace(/[-\s_]/g, '').toUpperCase() === decodedSku.replace(/[-\s_]/g, '')
+    );
+
+    if (logs.length === 0) {
+      logs = getAuditLogsForSku(decodedSku, prod?.stock || 10, prod?.name || 'Hardware Item');
+      skuAuditLogs.push(...logs);
+    }
+
+    logs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+    return res.json({
+      sku: decodedSku,
+      productId: prod?.id,
+      productName: prod?.name || logs[0]?.productName || 'Hardware Item',
+      currentStock: prod?.stock ?? 0,
+      warehouse: prod?.warehouse || 'Bay Area Hub (WH-01)',
+      logs
+    });
+  }
+
+  res.json({ logs: skuAuditLogs });
+});
+
+// POST /api/inventory/audit-logs - Append an audit log entry manually
+app.post('/api/inventory/audit-logs', (req, res) => {
+  const {
+    sku,
+    productName,
+    adjustmentValue,
+    adjustmentType,
+    previousStock,
+    newStock,
+    operatorId,
+    operatorName,
+    reason,
+    warehouse,
+    notes
+  } = req.body;
+
+  if (!sku || adjustmentValue === undefined) {
+    return res.status(400).json({ error: 'Missing required audit log parameters: sku and adjustmentValue' });
+  }
+
+  const prod = inventory.find(p => p.sku.toUpperCase() === sku.trim().toUpperCase());
+  const entry: SkuAuditLogEntry = {
+    id: _getUniqueServerId("audit"),
+    sku: sku.trim().toUpperCase(),
+    productId: prod?.id,
+    productName: productName || prod?.name || 'Hardware Item',
+    timestamp: new Date().toISOString(),
+    adjustmentValue: Number(adjustmentValue),
+    adjustmentType: adjustmentType || (adjustmentValue >= 0 ? 'add' : 'subtract'),
+    previousStock: Number(previousStock ?? prod?.stock ?? 0),
+    newStock: Number(newStock ?? (prod ? prod.stock + Number(adjustmentValue) : Number(adjustmentValue))),
+    operatorId: operatorId || 'OP-8821 (J. Vance)',
+    operatorName: operatorName || 'Julian Vance',
+    reason: reason || 'Physical Stock Verification',
+    warehouse: warehouse || prod?.warehouse || 'Bay Area Hub (WH-01)',
+    notes: notes || ''
+  };
+
+  skuAuditLogs.unshift(entry);
+  res.status(201).json({ success: true, log: entry });
 });
 
 // Simulation: Simulate external shopper purchase (for demonstrating live multi-user real-time stock updates)
@@ -551,6 +919,152 @@ app.post('/api/inventory/simulate-purchase', (req, res) => {
   });
 });
 
+// Update product price (or trigger promotional flash sale price drop)
+app.post('/api/inventory/update-price', (req, res) => {
+  const { productId, newPrice, discountPercent } = req.body as {
+    productId: string;
+    newPrice?: number;
+    discountPercent?: number;
+  };
+
+  const prod = inventory.find(p => p.id === productId);
+  if (!prod) {
+    return res.status(404).json({ error: 'Product not found' });
+  }
+
+  const oldPrice = prod.price;
+  let targetPrice = oldPrice;
+
+  if (typeof newPrice === 'number' && newPrice > 0) {
+    targetPrice = Math.round(newPrice * 100) / 100;
+  } else if (typeof discountPercent === 'number' && discountPercent > 0) {
+    targetPrice = Math.round(oldPrice * (1 - discountPercent / 100) * 100) / 100;
+  }
+
+  if (targetPrice === oldPrice) {
+    return res.json({ success: true, product: prod, unchanged: true });
+  }
+
+  if (!prod.originalPrice || prod.originalPrice < oldPrice) {
+    prod.originalPrice = oldPrice;
+  }
+  prod.price = targetPrice;
+
+  const dropAmount = Math.max(0, oldPrice - targetPrice);
+  const dropPercent = Math.round(((oldPrice - targetPrice) / oldPrice) * 100);
+
+  broadcast({
+    type: 'price:update',
+    payload: {
+      productId: prod.id,
+      productName: prod.name,
+      sku: prod.sku,
+      oldPrice,
+      newPrice: prod.price,
+      dropAmount,
+      dropPercent,
+      isPriceDrop: targetPrice < oldPrice
+    },
+    timestamp: new Date().toISOString()
+  });
+
+  if (targetPrice < oldPrice) {
+    broadcast({
+      type: 'inventory:alert',
+      payload: {
+        productId: prod.id,
+        productName: prod.name,
+        level: 'price_drop',
+        message: `FLASH SALE: "${prod.name}" marked down from $${oldPrice.toFixed(2)} to $${targetPrice.toFixed(2)} (${dropPercent}% OFF)!`
+      },
+      timestamp: new Date().toISOString()
+    });
+  }
+
+  res.json({
+    success: true,
+    product: prod,
+    oldPrice,
+    newPrice: prod.price,
+    dropAmount,
+    dropPercent
+  });
+});
+
+// Simulate price drop on a product (or random product) to demonstrate target price notifications
+app.post('/api/inventory/simulate-price-drop', (req, res) => {
+  const { productId, discountPercent = 15 } = req.body as { productId?: string; discountPercent?: number };
+  const target = productId ? inventory.find(p => p.id === productId) : inventory[0];
+  if (!target) {
+    return res.status(404).json({ error: 'Product not found' });
+  }
+
+  const oldPrice = target.price;
+  const pct = Math.min(80, Math.max(5, Number(discountPercent) || 15));
+  const newPrice = Math.round(oldPrice * (1 - pct / 100) * 100) / 100;
+
+  if (!target.originalPrice || target.originalPrice < oldPrice) {
+    target.originalPrice = oldPrice;
+  }
+  target.price = newPrice;
+
+  const dropAmount = oldPrice - newPrice;
+
+  broadcast({
+    type: 'price:update',
+    payload: {
+      productId: target.id,
+      productName: target.name,
+      sku: target.sku,
+      oldPrice,
+      newPrice: target.price,
+      dropAmount,
+      dropPercent: pct,
+      isPriceDrop: true
+    },
+    timestamp: new Date().toISOString()
+  });
+
+  broadcast({
+    type: 'inventory:alert',
+    payload: {
+      productId: target.id,
+      productName: target.name,
+      level: 'price_drop',
+      message: `PRICE DROP ALERT: "${target.name}" dropped to $${newPrice.toFixed(2)} (-${pct}%)!`
+    },
+    timestamp: new Date().toISOString()
+  });
+
+  res.json({
+    success: true,
+    product: target,
+    oldPrice,
+    newPrice,
+    dropAmount,
+    dropPercent: pct
+  });
+});
+
+// Reset product prices back to initial catalogue prices
+app.post('/api/inventory/reset-prices', (req, res) => {
+  for (const item of inventory) {
+    const orig = INITIAL_PRODUCTS.find(p => p.id === item.id);
+    if (orig) {
+      item.price = orig.price;
+      item.originalPrice = orig.originalPrice;
+    }
+  }
+
+  broadcast({
+    type: 'inventory:sync',
+    payload: { products: inventory, ordersCount: orders.length },
+    timestamp: new Date().toISOString()
+  });
+
+  res.json({ success: true, message: 'All catalogue prices reset' });
+});
+
 // Orders list
 app.get('/api/orders', (req, res) => {
   res.json({ orders });
@@ -574,6 +1088,226 @@ app.get('/api/metrics', (req, res) => {
     outOfStockCount: inventory.filter(p => p.stock === 0).length,
     ordersProcessedToday: orders.length + 18, // baseline realistic daily throughput
     activeReservations: Array.from(reservations.values()).reduce((acc, r) => acc + r.quantity, 0)
+  });
+});
+
+// Lazy Gemini client helper
+let geminiClient: GoogleGenAI | null = null;
+function getGeminiClient(): GoogleGenAI | null {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return null;
+  if (!geminiClient) {
+    try {
+      geminiClient = new GoogleGenAI({ apiKey });
+    } catch (e) {
+      console.warn('Gemini client init error:', e);
+      return null;
+    }
+  }
+  return geminiClient;
+}
+
+// AI-Powered SKU Suggestion Engine endpoint
+app.get('/api/inventory/ai-suggestions', async (req, res) => {
+  try {
+    const calculation = calculateSkuAiSuggestions(inventory, orders, skuAuditLogs);
+    
+    // Check if client requested Gemini strategic briefing or if Gemini is available
+    const wantGemini = req.query.gemini === 'true';
+    const ai = getGeminiClient();
+
+    if (wantGemini && ai) {
+      try {
+        const topUrgent = calculation.suggestions.slice(0, 4);
+        const prompt = `You are the OmniStore Chief Supply Chain AI Officer. 
+Analyze these high-velocity warehouse inventory replenishment metrics based on real-time stock depletion rates:
+${JSON.stringify({
+  urgentCount: calculation.urgentRestockCount,
+  avgBurnRate: calculation.averageDailyDepletionAll,
+  capitalNeeded: calculation.totalCapitalRecommended,
+  topItems: topUrgent.map(s => ({
+    sku: s.sku,
+    name: s.name,
+    stock: s.currentStock,
+    burnRate: s.dailyDepletionRate,
+    timeToStockoutHours: s.projectedStockoutHours,
+    recommendedRestockQty: s.recommendedRestockQty
+  }))
+}, null, 2)}
+
+Provide a sharp, 2-to-3 sentence executive restock directive highlighting the most urgent product stockout risks, recommended supplier order priorities, and inventory buffer protection. Keep it concise, action-oriented, and professional.`;
+
+        const response = await ai.models.generateContent({
+          model: 'gemini-3.8-flash',
+          contents: prompt,
+        });
+
+        if (response.text) {
+          calculation.executiveBriefing = response.text.trim();
+          calculation.algorithmDetails.usingGemini = true;
+        }
+      } catch (geminiErr) {
+        console.warn('Gemini AI synthesis fallback:', geminiErr);
+      }
+    }
+
+    res.json(calculation);
+  } catch (error: any) {
+    console.error('Error computing AI suggestions:', error);
+    res.status(500).json({ error: 'Failed to compute SKU suggestions', details: error.message });
+  }
+});
+
+// Dedicated endpoint to synthesize Gemini AI Strategic Executive Briefing
+app.post('/api/inventory/ai-suggestions/generate-briefing', async (req, res) => {
+  try {
+    const calculation = calculateSkuAiSuggestions(inventory, orders, skuAuditLogs);
+    const ai = getGeminiClient();
+
+    if (!ai) {
+      // Fallback to sophisticated analytical briefing if API key is not configured
+      return res.json({
+        success: true,
+        usingGemini: false,
+        briefing: calculation.executiveBriefing,
+        generatedAt: new Date().toISOString()
+      });
+    }
+
+    const urgentItems = calculation.suggestions.filter(s => s.urgency === 'critical' || s.urgency === 'high');
+    const prompt = `You are the OmniStore Strategic Supply Chain AI. 
+Review this warehouse inventory depletion report:
+- Total analyzed SKUs: ${calculation.totalSkusAnalyzed}
+- Urgent Stockout Risks: ${calculation.urgentRestockCount}
+- Overall Depletion Velocity: ${calculation.averageDailyDepletionAll} units/day
+- Total Restock Capital: $${calculation.totalCapitalRecommended.toLocaleString()}
+Top Items Needing Immediate PO:
+${urgentItems.map(item => `- ${item.sku} (${item.name}): Stock = ${item.currentStock}, Depletion = ${item.dailyDepletionRate}/day, Stockout in ~${item.projectedStockoutHours} hrs, Rec. PO = +${item.recommendedRestockQty}`).join('\n')}
+
+Synthesize an executive briefing with:
+1. Primary stockout bottleneck and imminent loss-of-sales exposure
+2. Specific SKU reorder directives
+3. Strategic warehouse buffer guidance.
+Limit response to 140 words.`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.8-flash',
+      contents: prompt,
+    });
+
+    res.json({
+      success: true,
+      usingGemini: true,
+      briefing: response.text?.trim() || calculation.executiveBriefing,
+      generatedAt: new Date().toISOString()
+    });
+  } catch (error: any) {
+    console.error('Error generating AI briefing:', error);
+    const calculation = calculateSkuAiSuggestions(inventory, orders, skuAuditLogs);
+    res.json({
+      success: true,
+      usingGemini: false,
+      briefing: calculation.executiveBriefing,
+      generatedAt: new Date().toISOString()
+    });
+  }
+});
+
+// Category Depletion Insights: identifies which categories are trending toward depletion based on real-time sales velocity
+app.get('/api/inventory/category-depletion', async (req, res) => {
+  try {
+    const report = calculateCategoryDepletionReport(inventory, orders, skuAuditLogs);
+    const withGemini = req.query.gemini === 'true';
+
+    if (withGemini) {
+      const ai = getGeminiClient();
+      if (ai) {
+        try {
+          const prompt = `You are the OmniStore Chief Supply Chain AI.
+Analyze category-level depletion trends and velocity turnover from real-time sales patterns:
+- Total Warehouse Burn Rate: ${report.overallWarehouseDepletionVelocity} units/day
+- Highest Turnover Category: ${report.highestTurnoverCategory}
+- Highest Runout Risk Category: ${report.highestRiskCategory}
+- Categories at Risk: ${report.categoriesAtRiskCount} of ${report.categories.length}
+- Total Recommended Optimal Reorder: +${report.totalRecommendedOptimalReorderUnits} units
+Category Breakdown:
+${report.categories.map(c => `- ${c.categoryLabel}: Avail = ${c.availableStock}u, Daily Burn = ${c.dailyBurnRate}u/d, Turnover = ${c.turnoverSpeed.toUpperCase()} (${c.turnoverRatio}x), Depletion in ~${c.projectedDepletionDays}d, Optimal Reorder = +${c.optimalReorderQuantity}u, Lead Time = ${c.suggestedPoLeadTimeDays}d, Top SKU = ${c.topDepletingSku.sku} (${c.topDepletingSku.hoursLeft}h left)`).join('\n')}
+
+Provide an ultra-concise 2-sentence executive summary highlighting warehouse categories with high velocity turnover and suggesting optimal reorder quantities based on current sales patterns.`;
+
+          const geminiRes = await ai.models.generateContent({
+            model: 'gemini-3.8-flash',
+            contents: prompt,
+          });
+
+          if (geminiRes.text) {
+            report.executiveAiSynthesis = geminiRes.text.trim();
+          }
+        } catch (err) {
+          console.warn('Gemini category synthesis fallback:', err);
+        }
+      }
+    }
+
+    res.json(report);
+  } catch (error: any) {
+    console.error('Error calculating category depletion:', error);
+    res.status(500).json({ error: 'Failed to compute category depletion', details: error.message });
+  }
+});
+
+// Quick AI restock application endpoint
+app.post('/api/inventory/ai-suggestions/quick-restock', (req, res) => {
+  const { productId, quantity, operatorId = 'OP-AI-DIRECTOR' } = req.body;
+  if (!productId || typeof quantity !== 'number' || quantity <= 0) {
+    return res.status(400).json({ error: 'Valid productId and positive quantity required' });
+  }
+
+  const product = inventory.find(p => p.id === productId || p.sku === productId);
+  if (!product) {
+    return res.status(404).json({ error: 'Product not found' });
+  }
+
+  const previousStock = product.stock;
+  product.stock += quantity;
+
+  // Append audit trail log
+  const newLog: SkuAuditLogEntry = {
+    id: _getUniqueServerId("audit"),
+    sku: product.sku,
+    productId: product.id,
+    productName: product.name,
+    timestamp: new Date().toISOString(),
+    adjustmentValue: quantity,
+    adjustmentType: 'restock',
+    previousStock,
+    newStock: product.stock,
+    operatorId: operatorId || 'OP-AI-DIRECTOR',
+    operatorName: 'AI Predictive Replenishment System',
+    reason: `AI Velocity Replenishment (+${quantity} units for 14-day safety buffer)`,
+    warehouse: product.warehouse,
+    batchNumber: `BATCH-AI-${Date.now().toString().slice(-6)}`,
+    notes: 'Triggered from AI-Powered SKU Suggestion Engine'
+  };
+
+  skuAuditLogs.unshift(newLog);
+
+  // Broadcast update
+  broadcast({
+    type: 'inventory:update',
+    payload: {
+      productId: product.id,
+      stock: product.stock,
+      reserved: product.reserved || 0
+    },
+    timestamp: new Date().toISOString()
+  });
+
+  res.json({
+    success: true,
+    message: `Replenished +${quantity} units to SKU ${product.sku} (${product.name})`,
+    product,
+    auditLog: newLog
   });
 });
 

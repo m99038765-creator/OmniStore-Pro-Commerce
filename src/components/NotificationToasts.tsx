@@ -12,7 +12,7 @@ export const NotificationToasts: React.FC = () => {
       className="fixed bottom-5 right-5 z-50 flex flex-col gap-2.5 max-w-sm w-full pointer-events-none"
     >
       <AnimatePresence>
-        {alerts.map((alert) => {
+        {alerts.map((alert, index) => {
           const isCritical = alert.type === 'critical';
           const isWarning = alert.type === 'warning';
           const isSuccess = alert.type === 'success';

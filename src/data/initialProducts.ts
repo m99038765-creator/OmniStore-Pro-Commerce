@@ -35,7 +35,45 @@ export const INITIAL_PRODUCTS: Product[] = [
     },
     isTrending: true,
     isBestSeller: true,
-    warranty: '5-Year Manufacturer Express Warranty'
+    warranty: '5-Year Manufacturer Express Warranty',
+    reviews: [
+      {
+        id: 'rev_aud_1',
+        productId: 'prod_studio_ref_monitors',
+        authorName: 'Marcus Thorne',
+        rating: 5,
+        title: 'Remarkable acoustic transparency and DSP room tuning',
+        comment: 'Set these up in my treated mixing suite. The DSP room calibration is phenomenal—it flattened out a 4dB room resonance around 125Hz immediately. Transients on kick drums and snare rims are tack-sharp without inducing listener fatigue after 8-hour sessions.',
+        createdAt: '2026-09-08T14:32:00.000Z',
+        verifiedPurchase: true,
+        helpfulCount: 26,
+        location: 'Seattle, WA'
+      },
+      {
+        id: 'rev_aud_2',
+        productId: 'prod_studio_ref_monitors',
+        authorName: 'Elena Rostova',
+        rating: 5,
+        title: 'Best coaxial nearfields under $2,000',
+        comment: 'Coaxial point-source imaging creates a holographic soundstage where you can pinpoint every instrument across the panoramic stereo spread. The woven Kevlar woofers deliver tight, controlled sub-bass.',
+        createdAt: '2026-08-22T09:15:00.000Z',
+        verifiedPurchase: true,
+        helpfulCount: 14,
+        location: 'Berlin, DE'
+      },
+      {
+        id: 'rev_aud_3',
+        productId: 'prod_studio_ref_monitors',
+        authorName: 'David Chen',
+        rating: 4,
+        title: 'Exceptional clarity, heavy enclosure',
+        comment: 'Stunning audio engineering and build quality. Make sure your speaker stands can support 25 lbs each. The gold-plated balanced XLR inputs ensure zero RF interference even near high-powered PC towers.',
+        createdAt: '2026-08-03T18:44:00.000Z',
+        verifiedPurchase: true,
+        helpfulCount: 7,
+        location: 'San Francisco, CA'
+      }
+    ]
   },
   {
     id: 'prod_mech_keyboard_cnc',
@@ -69,7 +107,45 @@ export const INITIAL_PRODUCTS: Product[] = [
       'Weight': '1.92 kg / 4.23 lbs'
     },
     isTrending: true,
-    warranty: '2-Year Direct Replacement Warranty'
+    warranty: '2-Year Direct Replacement Warranty',
+    reviews: [
+      {
+        id: 'rev_kb_1',
+        productId: 'prod_mech_keyboard_cnc',
+        authorName: 'Julian Vance',
+        rating: 5,
+        title: 'Pure acoustic bliss - the Poron gasket thock is real',
+        comment: 'The anodization on the 6063 billet aluminum feels smoother than glass. The factory-lubed Oil Kings require zero modification—no spring ping or scratchiness whatsoever. Typing 8 hours a day has never felt this effortless.',
+        createdAt: '2026-09-12T11:20:00.000Z',
+        verifiedPurchase: true,
+        helpfulCount: 31,
+        location: 'Austin, TX'
+      },
+      {
+        id: 'rev_kb_2',
+        productId: 'prod_mech_keyboard_cnc',
+        authorName: 'Sophie K.',
+        rating: 5,
+        title: 'Endgame 75% mechanical keyboard',
+        comment: 'South-facing LEDs with VIA web configurator made remapping seamless on macOS. The rotary knob has satisfying tactile detents with zero wobble.',
+        createdAt: '2026-08-30T16:05:00.000Z',
+        verifiedPurchase: true,
+        helpfulCount: 18,
+        location: 'Toronto, ON'
+      },
+      {
+        id: 'rev_kb_3',
+        productId: 'prod_mech_keyboard_cnc',
+        authorName: 'Chris Miller',
+        rating: 4,
+        title: 'Heavyweight masterpiece',
+        comment: 'At nearly 2 kilograms, this unit will not budge an inch on your desk mat. The PBT keycaps have a pleasant textured grain that resists finger oils.',
+        createdAt: '2026-08-11T13:40:00.000Z',
+        verifiedPurchase: true,
+        helpfulCount: 9,
+        location: 'Chicago, IL'
+      }
+    ]
   },
   {
     id: 'prod_cinema_camera_fx',
@@ -104,7 +180,33 @@ export const INITIAL_PRODUCTS: Product[] = [
       'Weight': '820 g (Body only)'
     },
     isBestSeller: true,
-    warranty: '3-Year Global Commercial Warranty'
+    warranty: '3-Year Global Commercial Warranty',
+    reviews: [
+      {
+        id: 'rev_cin_1',
+        productId: 'prod_cinema_camera_fx',
+        authorName: 'Kenji Takahashi',
+        rating: 5,
+        title: '15 stops of real dynamic range & continuous thermal reliability',
+        comment: 'Shot an entire automotive commercial outdoors in 95°F desert heat. The active cooling fan chamber ran silently and the camera never shut down. Open-gate 6K anamorphic capture gives endless reframing flexibility in DaVinci Resolve.',
+        createdAt: '2026-09-02T19:10:00.000Z',
+        verifiedPurchase: true,
+        helpfulCount: 38,
+        location: 'Los Angeles, CA'
+      },
+      {
+        id: 'rev_cin_2',
+        productId: 'prod_cinema_camera_fx',
+        authorName: 'Rachel Vance',
+        rating: 5,
+        title: 'Dual Native ISO saves documentary shoots',
+        comment: 'The second native ISO at 4000 is clean enough for commercial delivery with zero aggressive temporal denoise. Phase hybrid autofocus tracks human eyes reliably even in low candlelight.',
+        createdAt: '2026-08-18T10:45:00.000Z',
+        verifiedPurchase: true,
+        helpfulCount: 21,
+        location: 'London, UK'
+      }
+    ]
   },
   {
     id: 'prod_spatial_headphones_nc',
@@ -138,7 +240,33 @@ export const INITIAL_PRODUCTS: Product[] = [
       'Weight': '278 g'
     },
     isBestSeller: true,
-    warranty: '2-Year Premium Care Warranty'
+    warranty: '2-Year Premium Care Warranty',
+    reviews: [
+      {
+        id: 'rev_hp_1',
+        productId: 'prod_spatial_headphones_nc',
+        authorName: 'Daniel Ross',
+        rating: 5,
+        title: 'Lossless wireless that rivals wired reference cans',
+        comment: 'Beryllium drivers offer micro-detail I usually only hear on open-back planar headphones. The spatial soundstage is wide, and the memory foam lambskin cushions are plush for long mixing sessions.',
+        createdAt: '2026-09-14T08:25:00.000Z',
+        verifiedPurchase: true,
+        helpfulCount: 33,
+        location: 'New York, NY'
+      },
+      {
+        id: 'rev_hp_2',
+        productId: 'prod_spatial_headphones_nc',
+        authorName: 'Clara Lin',
+        rating: 4,
+        title: 'Phenomenal ANC, sleek industrial design',
+        comment: 'Active noise cancellation eliminates airplane cabin rumble completely. Battery life truly lasts weeks between charges with daily commute use.',
+        createdAt: '2026-08-25T14:12:00.000Z',
+        verifiedPurchase: true,
+        helpfulCount: 17,
+        location: 'Boston, MA'
+      }
+    ]
   },
   {
     id: 'prod_ultrawide_oled_display',
@@ -173,7 +301,33 @@ export const INITIAL_PRODUCTS: Product[] = [
       'Mounting': 'VESA 100x100mm with heavy-duty ergonomic arm'
     },
     isTrending: true,
-    warranty: '3-Year Zero-Burn-In Guarantee'
+    warranty: '3-Year Zero-Burn-In Guarantee',
+    reviews: [
+      {
+        id: 'rev_oled_1',
+        productId: 'prod_ultrawide_oled_display',
+        authorName: 'Henrik Lindqvist',
+        rating: 5,
+        title: 'Replaced my entire dual-monitor setup',
+        comment: '5120x1440 QD-OLED provides infinite blacks without blooming or backlight bleed. The built-in hardware KVM switch allows me to toggle keyboard and mouse between my work MacBook and PC with one shortcut.',
+        createdAt: '2026-09-04T12:00:00.000Z',
+        verifiedPurchase: true,
+        helpfulCount: 45,
+        location: 'Stockholm, SE'
+      },
+      {
+        id: 'rev_oled_2',
+        productId: 'prod_ultrawide_oled_display',
+        authorName: 'Priya Patel',
+        rating: 5,
+        title: 'True color calibration and 240Hz fluidity',
+        comment: 'Factory Delta E < 1 calibration was immediately noticeable in Figma and Lightroom. 240Hz refresh rate makes text scrolling and window management buttery smooth.',
+        createdAt: '2026-08-20T17:35:00.000Z',
+        verifiedPurchase: true,
+        helpfulCount: 22,
+        location: 'San Jose, CA'
+      }
+    ]
   },
   {
     id: 'prod_thunderbolt_raid_dock',
@@ -206,7 +360,33 @@ export const INITIAL_PRODUCTS: Product[] = [
       'Cooling': 'Whisper-quiet magnetic levitation fluid fan (<18 dB)',
       'Dimensions': '142 x 94 x 42 mm'
     },
-    warranty: '5-Year Enterprise Data Recovery Warranty'
+    warranty: '5-Year Enterprise Data Recovery Warranty',
+    reviews: [
+      {
+        id: 'rev_tb4_1',
+        productId: 'prod_thunderbolt_raid_dock',
+        authorName: 'Mateo Fernandez',
+        rating: 5,
+        title: 'Blistering 7,200 MB/s speed for 8K REDCODE',
+        comment: 'Zero dropped frames while scrubbing multiple 8K RAW streams simultaneously in Premiere Pro. The hardware AES-256 encryption gives total peace of mind when traveling between client production sets.',
+        createdAt: '2026-09-06T15:10:00.000Z',
+        verifiedPurchase: true,
+        helpfulCount: 19,
+        location: 'Miami, FL'
+      },
+      {
+        id: 'rev_tb4_2',
+        productId: 'prod_thunderbolt_raid_dock',
+        authorName: 'Nathan Brooks',
+        rating: 4,
+        title: 'Fast, compact, and whisper quiet',
+        comment: 'Daisy-chained two 4K displays and an audio interface seamlessly. The internal magnetic levitation fan stays virtually silent even under prolonged sustained write benchmarks.',
+        createdAt: '2026-08-14T11:40:00.000Z',
+        verifiedPurchase: true,
+        helpfulCount: 11,
+        location: 'Denver, CO'
+      }
+    ]
   },
   {
     id: 'prod_broadcast_mic_boom',
@@ -240,7 +420,33 @@ export const INITIAL_PRODUCTS: Product[] = [
       'Housing': 'Dark graphite enameled die-cast aluminum'
     },
     isBestSeller: true,
-    warranty: '10-Year Built-to-Last Guarantee'
+    warranty: '10-Year Built-to-Last Guarantee',
+    reviews: [
+      {
+        id: 'rev_mic_1',
+        productId: 'prod_broadcast_mic_boom',
+        authorName: 'Sarah Jenkins',
+        rating: 5,
+        title: 'Warm radio broadcast tone straight out of the box',
+        comment: 'Rejects untreated room reverberation and mechanical keyboard clicks better than any dynamic mic I have tested. The built-in stainless pop filter completely tames harsh plosive bursts without an ugly foam cover.',
+        createdAt: '2026-09-10T16:50:00.000Z',
+        verifiedPurchase: true,
+        helpfulCount: 28,
+        location: 'Nashville, TN'
+      },
+      {
+        id: 'rev_mic_2',
+        productId: 'prod_broadcast_mic_boom',
+        authorName: 'Liam O’Connor',
+        rating: 5,
+        title: 'Voiceover broadcaster’s dream',
+        comment: 'Internal pneumatic shock isolation handles desk bumps effortlessly. The mid-range presence boost switch gives spoken voice broadcast authority without requiring aggressive post-EQ.',
+        createdAt: '2026-08-27T09:30:00.000Z',
+        verifiedPurchase: true,
+        helpfulCount: 16,
+        location: 'Dublin, IE'
+      }
+    ]
   },
   {
     id: 'prod_biometric_chronograph',
@@ -275,6 +481,32 @@ export const INITIAL_PRODUCTS: Product[] = [
       'Weight': '62 g (Body only)'
     },
     isTrending: true,
-    warranty: '2-Year Worldwide Warranty'
+    warranty: '2-Year Worldwide Warranty',
+    reviews: [
+      {
+        id: 'rev_chrono_1',
+        productId: 'prod_biometric_chronograph',
+        authorName: 'Viktor Berg',
+        rating: 5,
+        title: 'Expedition-grade reliability & solar autonomy',
+        comment: 'Spent 3 weeks backpacking across the Rockies. The battery barely dropped 15% thanks to the high-efficiency solar sapphire crystal. Dual-frequency GNSS locked satellite signal even in narrow canyon gorges.',
+        createdAt: '2026-09-01T14:15:00.000Z',
+        verifiedPurchase: true,
+        helpfulCount: 34,
+        location: 'Boulder, CO'
+      },
+      {
+        id: 'rev_chrono_2',
+        productId: 'prod_biometric_chronograph',
+        authorName: 'Mia Tanaka',
+        rating: 4,
+        title: 'Lightweight titanium and ultra-crisp display in sunlight',
+        comment: 'At 62 grams it feels virtually unnoticeable on the wrist during marathon training. The transflective MIP display is easiest to read in the brightest direct noon sun.',
+        createdAt: '2026-08-16T18:00:00.000Z',
+        verifiedPurchase: true,
+        helpfulCount: 13,
+        location: 'Portland, OR'
+      }
+    ]
   }
 ];
