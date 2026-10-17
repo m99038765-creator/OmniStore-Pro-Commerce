@@ -28,7 +28,10 @@ import {
   AlertCircle,
   Lock,
   Check,
-  Tag
+  Tag,
+  FileText,
+  Scale,
+  ShieldCheck
 } from 'lucide-react';
 import { useStore } from '../context/StoreContext';
 import { Product } from '../types';
@@ -42,6 +45,8 @@ import { BulkQrCodeModal } from './BulkQrCodeModal';
 import { VoiceDictationButton } from './VoiceDictationButton';
 import { WarehouseAiSkuSuggestions } from './WarehouseAiSkuSuggestions';
 import { ReservationConflictAlertModal } from './ReservationConflictAlertModal';
+import { AuditComplianceReportModal } from './AuditComplianceReportModal';
+import { StockVarianceMonitorModal } from './StockVarianceMonitorModal';
 
 export const WarehouseAdminModal: React.FC = () => {
   const {
@@ -68,7 +73,10 @@ export const WarehouseAdminModal: React.FC = () => {
     adminTargetProductId,
     setAdminTargetProductId,
     updateProductPrice,
-    addAlert
+    addAlert,
+    isSafeModeEnabled,
+    setIsSafeModeEnabled,
+    checkSkuSafety
   } = useStore();
 
   const [scannerProductId, setScannerProductId] = useState<string | null>(null);
@@ -80,8 +88,10 @@ export const WarehouseAdminModal: React.FC = () => {
   const [editingPriceId, setEditingPriceId] = useState<string | null>(null);
   const [editPriceValue, setEditPriceValue] = useState<string>('');
 
-  // Bulk QR Code Generation State
+  // Bulk QR Code, Audit Compliance, and Stock Variance Monitor State
   const [isBulkQrOpen, setIsBulkQrOpen] = useState(false);
+  const [isAuditReportOpen, setIsAuditReportOpen] = useState(false);
+  const [isVarianceMonitorOpen, setIsVarianceMonitorOpen] = useState(false);
   const [skuFilterSearch, setSkuFilterSearch] = useState('');
   const [skuFilterCategory, setSkuFilterCategory] = useState('all');
   const [skuFilterWarehouse, setSkuFilterWarehouse] = useState('all');
@@ -207,6 +217,12 @@ export const WarehouseAdminModal: React.FC = () => {
   // Filtered products list for inventory view
   const filteredInventoryProducts = useMemo(() => {
     return products.filter(product => {
+      // Safe Mode: instantly filter out Quarantine or Damaged / unsafe SKUs
+      if (isSafeModeEnabled) {
+        const safety = checkSkuSafety(product.sku);
+        if (!safety.isSafe) return false;
+      }
+
       if (skuFilterCategory !== 'all' && product.category !== skuFilterCategory) {
         return false;
       }
@@ -225,7 +241,7 @@ export const WarehouseAdminModal: React.FC = () => {
       }
       return true;
     });
-  }, [products, skuFilterCategory, skuFilterWarehouse, skuFilterSearch]);
+  }, [products, skuFilterCategory, skuFilterWarehouse, skuFilterSearch, isSafeModeEnabled, checkSkuSafety]);
 
   useEffect(() => {
     if (!isAdminOpen) return;
@@ -447,7 +463,7 @@ export const WarehouseAdminModal: React.FC = () => {
           </div>
 
           {/* Navigation Tabs Bar */}
-          <div className="flex items-center justify-between px-4 sm:px-5 py-2.5 border-b border-neutral-800 bg-neutral-900/50">
+          <div className="flex items-center justify-between px-4 sm:px-5 py-2.5 border-b border-neutral-800 bg-neutral-900/50 flex-wrap gap-3">
             <div className="flex items-center gap-2">
               <button
                 id="warehouse-tab-inventory-btn"
@@ -504,8 +520,56 @@ export const WarehouseAdminModal: React.FC = () => {
               </button>
             </div>
 
+            {/* Prominent Safe Mode Toggle Switch */}
+            <div className="flex items-center gap-2">
+              <button
+                id="warehouse-admin-safe-mode-toggle"
+                type="button"
+                onClick={() => {
+                  const newState = !isSafeModeEnabled;
+                  setIsSafeModeEnabled(newState);
+                  addAlert(
+                    newState ? 'success' : 'info',
+                    newState ? '🛡️ Safe Mode Enabled' : 'Safe Mode Disabled',
+                    newState ? 'Quarantine & Damaged SKUs are now filtered out from batch update views.' : 'All quarantine & damaged SKUs are now visible.'
+                  );
+                }}
+                className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-2 transition-all cursor-pointer border ${
+                  isSafeModeEnabled
+                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/60 shadow-md shadow-emerald-950/40 ring-1 ring-emerald-500/30 font-bold'
+                    : 'bg-neutral-900 text-neutral-400 hover:text-white border-neutral-800'
+                }`}
+                title="Mirrors storefront Safe Mode: instantly filters out Quarantine or Damaged stock from batch update views"
+              >
+                <ShieldCheck className={`w-4 h-4 ${isSafeModeEnabled ? 'text-emerald-400' : 'text-neutral-500'}`} />
+                <span>Safe Mode: {isSafeModeEnabled ? 'ON' : 'OFF'}</span>
+              </button>
+            </div>
+
             {adminActiveTab === 'inventory' && (
               <div className="flex items-center gap-2">
+                <button
+                  id="warehouse-stock-variance-monitor-btn"
+                  onClick={() => setIsVarianceMonitorOpen(true)}
+                  className="text-xs font-mono text-rose-400 hover:text-rose-300 flex items-center gap-1.5 py-1 px-2.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 transition-colors cursor-pointer"
+                  title="Monitor discrepancies between system inventory and physical audit counts (>5% threshold alert)"
+                >
+                  <Scale className="w-3.5 h-3.5 text-rose-400 animate-pulse" />
+                  <span className="hidden sm:inline">Stock Variance Monitor</span>
+                  <span className="sm:hidden">Variance</span>
+                </button>
+
+                <button
+                  id="warehouse-audit-compliance-report-btn"
+                  onClick={() => setIsAuditReportOpen(true)}
+                  className="text-xs font-mono text-amber-400 hover:text-amber-300 flex items-center gap-1.5 py-1 px-2.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 transition-colors cursor-pointer"
+                  title="Generate summarized Audit Compliance Report combining inventory snapshots and modification logs"
+                >
+                  <FileText className="w-3.5 h-3.5 text-amber-400" />
+                  <span className="hidden sm:inline">Audit Compliance Report</span>
+                  <span className="sm:hidden">Audit Report</span>
+                </button>
+
                 <button
                   id="warehouse-bulk-qr-gen-btn"
                   onClick={() => setIsBulkQrOpen(true)}
@@ -828,7 +892,87 @@ export const WarehouseAdminModal: React.FC = () => {
                   onJumpToRow={handleJumpToSkuRow}
                 />
 
-                {/* Inventory Filter Bar with Bulk QR Generation for Current View */}
+
+                {/* Quick Filter Presets Bar */}
+                <div className="mb-3 flex items-center gap-1.5 overflow-x-auto pb-1 text-xs">
+                  <span className="text-[11px] font-mono text-neutral-400 shrink-0 flex items-center gap-1 font-semibold">
+                    <Sparkles className="w-3 h-3 text-amber-400" />
+                    <span>Quick Filters:</span>
+                  </span>
+
+                  <button
+                    id="preset-filter-all-btn"
+                    type="button"
+                    onClick={() => {
+                      setSkuFilterCategory('all');
+                      setSkuFilterWarehouse('all');
+                      setSkuFilterSearch('');
+                      addAlert('info', 'Preset Applied', 'Viewing all warehouse inventory items.');
+                    }}
+                    className={`px-2.5 py-1 rounded-lg font-medium transition-all whitespace-nowrap cursor-pointer border ${
+                      skuFilterCategory === 'all' && skuFilterWarehouse === 'all' && !skuFilterSearch
+                        ? 'bg-neutral-800 text-white border-neutral-700 shadow-xs font-bold'
+                        : 'bg-neutral-950 text-neutral-400 hover:text-white border-neutral-800'
+                    }`}
+                  >
+                    All Inventory
+                  </button>
+
+                  <button
+                    id="preset-filter-low-stock-btn"
+                    type="button"
+                    onClick={() => {
+                      setSkuFilterCategory('all');
+                      setSkuFilterWarehouse('all');
+                      setSkuFilterSearch('low stock');
+                      addAlert('warning', 'Preset Applied', 'Filtered by low stock warning thresholds (≤ 4 units).');
+                    }}
+                    className={`px-2.5 py-1 rounded-lg font-medium transition-all whitespace-nowrap cursor-pointer border ${
+                      skuFilterSearch === 'low stock'
+                        ? 'bg-amber-500/25 text-amber-300 border-amber-500/50 shadow-xs font-bold'
+                        : 'bg-neutral-950 text-neutral-400 hover:text-amber-400 border-neutral-800'
+                    }`}
+                  >
+                    ⚠️ Low Stock
+                  </button>
+
+                  <button
+                    id="preset-filter-gpus-btn"
+                    type="button"
+                    onClick={() => {
+                      setSkuFilterCategory('GPUs');
+                      setSkuFilterWarehouse('all');
+                      setSkuFilterSearch('');
+                      addAlert('info', 'Preset Applied', 'Filtered by GPU Hardware category.');
+                    }}
+                    className={`px-2.5 py-1 rounded-lg font-medium transition-all whitespace-nowrap cursor-pointer border ${
+                      skuFilterCategory === 'GPUs'
+                        ? 'bg-sky-500/25 text-sky-300 border-sky-500/50 shadow-xs font-bold'
+                        : 'bg-neutral-950 text-neutral-400 hover:text-sky-400 border-neutral-800'
+                    }`}
+                  >
+                    🖥️ GPUs & Hardware
+                  </button>
+
+                  <button
+                    id="preset-filter-central-hub-btn"
+                    type="button"
+                    onClick={() => {
+                      setSkuFilterCategory('all');
+                      setSkuFilterWarehouse('Central Logistics Hub');
+                      setSkuFilterSearch('');
+                      addAlert('info', 'Preset Applied', 'Filtered to Central Logistics Hub.');
+                    }}
+                    className={`px-2.5 py-1 rounded-lg font-medium transition-all whitespace-nowrap cursor-pointer border ${
+                      skuFilterWarehouse === 'Central Logistics Hub'
+                        ? 'bg-emerald-500/25 text-emerald-300 border-emerald-500/50 shadow-xs font-bold'
+                        : 'bg-neutral-950 text-neutral-400 hover:text-emerald-400 border-neutral-800'
+                    }`}
+                  >
+                    📍 Central Hub
+                  </button>
+                </div>
+
                 <div
                   id="admin-inventory-filter-bar"
                   className="mb-3.5 p-3 rounded-xl bg-neutral-900/60 border border-neutral-800 flex flex-wrap items-center justify-between gap-3 text-xs"
@@ -1376,6 +1520,20 @@ export const WarehouseAdminModal: React.FC = () => {
           );
           setBulkConflictCandidates(null);
         }}
+      />
+
+      {/* Audit Compliance Report Modal */}
+      <AuditComplianceReportModal
+        isOpen={isAuditReportOpen}
+        onClose={() => setIsAuditReportOpen(false)}
+        products={products}
+      />
+
+      {/* Stock Variance Monitor & Reconciliation Modal */}
+      <StockVarianceMonitorModal
+        isOpen={isVarianceMonitorOpen}
+        onClose={() => setIsVarianceMonitorOpen(false)}
+        products={products}
       />
     </AnimatePresence>
   );

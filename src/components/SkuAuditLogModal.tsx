@@ -19,10 +19,12 @@ import {
   ShieldCheck,
   Download,
   AlertCircle,
-  FileJson
+  FileJson,
+  Printer
 } from 'lucide-react';
 import { Product, SkuAuditLogEntry } from '../types';
 import { getAuditLogsForSku } from '../data/initialAuditLogs';
+import { AuditLogExportModal } from './AuditLogExportModal';
 
 interface SkuAuditLogModalProps {
   product?: Product | null;
@@ -48,9 +50,10 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [searchFilter, setSearchFilter] = useState<string>('');
-  const [typeFilter, setTypeFilter] = useState<'all' | 'positive' | 'negative' | 'cycle_count'>('all');
+  const [typeFilter, setTypeFilter] = useState<'all' | 'positive' | 'negative' | 'cycle_count' | 'last_8h'>('all');
   const [copiedSku, setCopiedSku] = useState(false);
   const [copiedCsv, setCopiedCsv] = useState(false);
+  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
 
   // Fetch audit logs from server API or local fallback
   const fetchAuditLogs = async () => {
@@ -142,6 +145,12 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
     URL.revokeObjectURL(url);
   };
 
+  // Open granular export modal allowing Compact Summary or Full Forensic Log
+  const handleExportPdf = () => {
+    if (logs.length === 0) return;
+    setIsExportModalOpen(true);
+  };
+
   // Filter logs
   const filteredLogs = useMemo(() => {
     return logs.filter(log => {
@@ -149,6 +158,12 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
       if (typeFilter === 'positive' && log.adjustmentValue <= 0) return false;
       if (typeFilter === 'negative' && log.adjustmentValue >= 0) return false;
       if (typeFilter === 'cycle_count' && log.adjustmentType !== 'cycle_count') return false;
+      if (typeFilter === 'last_8h') {
+        const logTime = new Date(log.timestamp).getTime();
+        const eightHoursAgo = Date.now() - 8 * 60 * 60 * 1000;
+        // If timestamp is invalid or older than 8 hours, exclude (with fallback for demo logs)
+        if (!isNaN(logTime) && logTime < eightHoursAgo) return false;
+      }
 
       // Text query filtering
       if (!searchFilter.trim()) return true;
@@ -346,6 +361,20 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
               >
                 Cycle Count
               </button>
+              <button
+                type="button"
+                id="filter-audit-last-8h-btn"
+                onClick={() => setTypeFilter('last_8h')}
+                className={`px-2.5 py-1 rounded-lg font-medium transition-colors cursor-pointer flex items-center gap-1 ${
+                  typeFilter === 'last_8h'
+                    ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40 shadow-xs'
+                    : 'text-neutral-400 hover:text-sky-400'
+                }`}
+                title="View modifications that occurred within the last 8 hours (Current Shift)"
+              >
+                <Clock className="w-3 h-3 text-sky-400" />
+                <span>Last 8 Hours</span>
+              </button>
             </div>
 
             <button
@@ -535,6 +564,17 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              id="sku-audit-export-pdf-btn"
+              onClick={handleExportPdf}
+              className="px-3 py-1.5 text-xs font-semibold rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 transition-colors flex items-center gap-1.5 cursor-pointer"
+              title="Generate comprehensive PDF report containing historical modifications, quarantine flags, and staff notes"
+            >
+              <Printer className="w-3.5 h-3.5 text-amber-400" />
+              <span>Export Audit Log (PDF)</span>
+            </button>
+
             {product && onOpenStockAdjust && (
               <button
                 type="button"
@@ -561,6 +601,16 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Granular Audit Log Export Modal */}
+      <AuditLogExportModal
+        isOpen={isExportModalOpen}
+        onClose={() => setIsExportModalOpen(false)}
+        sku={activeSku}
+        productName={productName}
+        warehouse={warehouse}
+        logs={logs}
+      />
     </div>
   );
 };

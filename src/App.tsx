@@ -35,7 +35,8 @@ import {
   Network,
   Tag,
   Clock,
-  Scale
+  Scale,
+  Printer
 } from 'lucide-react';
 import { StoreProvider, useStore } from './context/StoreContext';
 import { LiveTickerBar } from './components/LiveTickerBar';
@@ -57,6 +58,7 @@ import { ProductQrCodeModal } from './components/ProductQrCodeModal';
 import { InventoryAlertModal } from './components/InventoryAlertModal';
 import { WarehouseInventoryChart } from './components/WarehouseInventoryChart';
 import { PredictiveInsightsWidget } from './components/PredictiveInsightsWidget';
+import { LowStockDashboardBanner } from './components/LowStockDashboardBanner';
 import { UserProfileModal } from './components/UserProfileModal';
 import { ScannerModal, extractSkuFromDecodedText } from './components/ScannerModal';
 import { VoiceDictationButton } from './components/VoiceDictationButton';
@@ -611,6 +613,17 @@ const StorefrontContent: React.FC = () => {
 
       {/* Main Catalog View */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-10">
+        {/* Automated Low-Stock 7-Day Trending Notification Banner */}
+        <LowStockDashboardBanner
+          products={products}
+          orders={orders}
+          onOpenPredictiveWidget={() => {
+            const el = document.getElementById('predictive-insights-widget');
+            if (el) el.scrollIntoView({ behavior: 'smooth' });
+          }}
+          onOpenProductDetail={(prod) => setSkuAdjustProduct(prod as any)}
+        />
+
         {/* Predictive Insights Dashboard Widget */}
         <PredictiveInsightsWidget
           products={products}
@@ -634,7 +647,7 @@ const StorefrontContent: React.FC = () => {
         {/* Controls and Filters Bar */}
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-6 border-b border-neutral-800/80 mb-6">
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <h2 className="text-lg font-bold text-white tracking-tight">Catalog Inventory</h2>
               <span className="text-xs font-mono px-2 py-0.5 rounded-full bg-neutral-900 border border-neutral-800 text-neutral-400">
                 {filteredProducts.length} items
@@ -645,6 +658,80 @@ const StorefrontContent: React.FC = () => {
                   SKU Search Active
                 </span>
               )}
+
+              {/* Quick Bulk Print Feature Button */}
+              <button
+                id="quick-bulk-print-barcodes-btn"
+                type="button"
+                onClick={async () => {
+                  if (filteredProducts.length === 0) {
+                    addAlert('warning', 'No SKUs Found', 'No items match the current filter criteria for bulk barcode printing.');
+                    return;
+                  }
+
+                  const printWindow = window.open('', '_blank');
+                  if (!printWindow) {
+                    addAlert('error', 'Popup Blocked', 'Please allow popups to generate the printable barcode report.');
+                    return;
+                  }
+
+                  const barcodeHtml = filteredProducts.map(p => `
+                    <div class="barcode-card">
+                      <div class="sku">${p.sku}</div>
+                      <div class="barcode-lines">|||| | |||||| |||| |</div>
+                      <div class="name">${p.name}</div>
+                      <div class="meta">${p.warehouse} • $${p.price.toFixed(2)} • Stock: ${p.stock}u</div>
+                    </div>
+                  `).join('');
+
+                  const html = `
+                    <!DOCTYPE html>
+                    <html>
+                      <head>
+                        <title>Quick Bulk Barcode Report - ${filteredProducts.length} SKUs</title>
+                        <style>
+                          body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; background: white; color: black; }
+                          h1 { font-size: 18px; margin-bottom: 4px; }
+                          p { font-size: 12px; color: #555; margin-bottom: 20px; }
+                          .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+                          .barcode-card { border: 1px solid #ccc; border-radius: 6px; padding: 14px; text-align: center; page-break-inside: avoid; }
+                          .sku { font-family: monospace; font-weight: bold; font-size: 15px; margin-bottom: 6px; }
+                          .barcode-lines { font-family: monospace; font-size: 22px; letter-spacing: -2px; font-weight: bold; margin: 8px 0; color: #111; }
+                          .name { font-size: 11px; font-weight: 600; text-transform: uppercase; margin-top: 4px; }
+                          .meta { font-size: 9px; color: #666; margin-top: 4px; }
+                          @media print {
+                            body { padding: 0; }
+                            .grid { gap: 10px; }
+                            .barcode-card { border: 1px dashed #888; }
+                            @page { margin: 0.4in; }
+                          }
+                        </style>
+                      </head>
+                      <body>
+                        <h1>Quick Bulk Barcode Print Report</h1>
+                        <p>Generated at ${new Date().toLocaleString()} • Total Filtered SKUs: ${filteredProducts.length}</p>
+                        <div class="grid">
+                          ${barcodeHtml}
+                        </div>
+                        <script>
+                          window.onload = () => {
+                            setTimeout(() => { window.print(); }, 400);
+                          };
+                        </script>
+                      </body>
+                    </html>
+                  `;
+
+                  printWindow.document.write(html);
+                  printWindow.document.close();
+                  addAlert('success', 'Bulk Barcode PDF Generated', `Prepared printable barcode report for ${filteredProducts.length} filtered SKU(s).`);
+                }}
+                className="ml-2 px-3 py-1 rounded-xl bg-sky-500/15 hover:bg-sky-500/25 border border-sky-500/40 text-sky-300 font-semibold text-xs flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+                title="Generate printable PDF report of barcodes for all currently filtered SKUs in the catalog"
+              >
+                <Printer className="w-3.5 h-3.5 text-sky-400" />
+                <span>Quick Bulk Print ({filteredProducts.length} SKUs)</span>
+              </button>
             </div>
             <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-400 mt-1">
               <span>Transit Anchor:</span>

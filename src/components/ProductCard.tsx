@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Navigation, Star, ShoppingBag, Eye, ShieldAlert, Check, MapPin, Sparkles, Scale, Heart, QrCode, BellRing, Zap, Barcode, AlertTriangle, CheckSquare, Square, Lock, Tag, Network, Sliders } from 'lucide-react';
+import { Navigation, Star, ShoppingBag, Eye, ShieldAlert, Check, MapPin, Sparkles, Scale, Heart, QrCode, BellRing, Zap, Barcode, AlertTriangle, CheckSquare, Square, Lock, Tag, Network, Sliders, Truck } from 'lucide-react';
 import { Product } from '../types';
 import { getDistanceToWarehouse, MOCK_USER_LOCATION } from '../utils/distance';
 import { useStore } from '../context/StoreContext';
 import { TransitEstimationBadge } from './TransitEstimationBadge';
 import { QuickShipIndicator } from './QuickShipIndicator';
+import { QuickReallocateModal } from './QuickReallocateModal';
 
 interface ProductCardProps {
   product: Product;
@@ -32,11 +33,14 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
     isReserved,
     showWarehouseTags,
     tagColorMap,
-    openAdminForProduct
+    openAdminForProduct,
+    adminSelectedProductIds,
+    customerDefaultWarehouse
   } = useStore();
   const itemReserved = isReserved(product.id);
   const [justAdded, setJustAdded] = useState(false);
   const [justQuickBought, setJustQuickBought] = useState(false);
+  const [isReallocateOpen, setIsReallocateOpen] = useState(false);
 
   const isSelected = selectedCatalogProductIds.includes(product.id);
   const isOutOfStock = product.stock <= 0;
@@ -45,6 +49,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
   const isWishlisted = product.isWishlisted ?? product.wishlist ?? checkIsWishlisted(product.id) ?? wishlistProductIds.includes(product.id);
   const existingAlert = inventoryAlerts.find(a => a.productId === product.id);
   const distance = getDistanceToWarehouse(product.warehouse);
+  const isNearestHub = customerDefaultWarehouse && product.warehouse.toLowerCase().includes(customerDefaultWarehouse.toLowerCase().split('(')[0].trim());
 
 
   const terms = skuSearchQuery.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
@@ -168,6 +173,28 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
             >
               <Network className="w-3 h-3 text-purple-400 shrink-0" />
               <span>Related Variant</span>
+            </span>
+          )}
+
+          {isNearestHub && (
+            <span
+              id={`nearest-hub-badge-${product.id}`}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-mono font-bold tracking-wide bg-emerald-950/95 text-emerald-300 border border-emerald-500/60 shadow-lg shadow-emerald-950/50 backdrop-blur-md"
+              title={`Stocked at your primary regional warehouse (${product.warehouse})`}
+            >
+              <Navigation className="w-3 h-3 text-emerald-400 shrink-0" />
+              <span>Nearest Hub</span>
+            </span>
+          )}
+
+          {adminSelectedProductIds.includes(product.id) && (
+            <span
+              id={`in-current-batch-badge-${product.id}`}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-mono font-bold tracking-wide bg-sky-950/95 text-sky-300 border border-sky-500/60 shadow-lg shadow-sky-950/50 backdrop-blur-md animate-pulse"
+              title="SKU is currently selected in the pending warehouse batch update queue"
+            >
+              <Sliders className="w-3 h-3 text-sky-400 shrink-0" />
+              <span>In Current Batch</span>
             </span>
           )}
 
@@ -543,6 +570,20 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
             </button>
           </div>
 
+          {/* Quick Reallocate Stock Button */}
+          <button
+            id={`quick-reallocate-btn-${product.id}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              setIsReallocateOpen(true);
+            }}
+            className="w-full py-1.5 px-3 rounded-xl bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/30 text-sky-300 hover:text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-xs"
+            title="Instantly reallocate stock to secondary distribution center based on regional proximity"
+          >
+            <Truck className="w-3.5 h-3.5 text-sky-400" />
+            <span>Quick Reallocate Stock</span>
+          </button>
+
           {/* Action Buttons: Add to Cart + Quick Buy + Reserve Item */}
           <div className="grid grid-cols-3 gap-1.5 sm:gap-2">
             {/* Standard Add to Cart Button */}
@@ -626,6 +667,13 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
           </div>
         </div>
       </div>
+
+      {/* Quick Reallocate Modal */}
+      <QuickReallocateModal
+        product={product}
+        isOpen={isReallocateOpen}
+        onClose={() => setIsReallocateOpen(false)}
+      />
     </motion.div>
   );
 };
