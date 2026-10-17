@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
-import { Product, CartItem, Order, RealtimeMessage, WarehouseStockMetrics, ShippingDetails, PaymentFormState, InventoryAlert, ProductReview, UserProfile, SavedAddress, CommunicationPreferences, SkuAuditLogEntry, SkuSafetyCheckResult } from '../types';
+import { Product, CartItem, Order, RealtimeMessage, WarehouseStockMetrics, ShippingDetails, PaymentFormState, InventoryAlert, ProductReview, UserProfile, SavedAddress, CommunicationPreferences, SkuAuditLogEntry, SkuSafetyCheckResult, WarehouseConflictEvent } from '../types';
 import { INITIAL_SAMPLE_ORDERS, createSampleOrder } from '../data/sampleOrders';
 import { INITIAL_USER_PROFILE } from '../data/initialUserProfile';
 import { INITIAL_SKU_AUDIT_LOGS } from '../data/initialAuditLogs';
@@ -174,6 +174,14 @@ interface StoreContextType {
   recentSearchedSkus: string[];
   maxDeliveryDays: number | null;
   setMaxDeliveryDays: (days: number | null) => void;
+  adminTargetProductId: string | null;
+  setAdminTargetProductId: (id: string | null) => void;
+  openAdminForProduct: (product: Product) => void;
+  warehouseConflicts: WarehouseConflictEvent[];
+  dismissWarehouseConflict: (id: string) => void;
+  resolveWarehouseConflict: (conflictId: string, resolution: 'override' | 'yield' | 'refresh') => Promise<void>;
+  reportInventoryEditingSession: (sku: string, productId: string, status: 'start' | 'stop', action?: string) => Promise<void>;
+  simulateWarehouseConflict: (sku?: string) => Promise<WarehouseConflictEvent | null>;
 }
 
 const StoreContext = createContext<StoreContextType | null>(null);
@@ -255,6 +263,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [isAdminOpen, setIsAdminOpen] = useState(false);
   const [adminActiveTab, setAdminActiveTab] = useState<'inventory' | 'batch' | 'scanner'>('inventory');
   const [adminSelectedProductIds, setAdminSelectedProductIds] = useState<string[]>([]);
+  const [adminTargetProductId, setAdminTargetProductId] = useState<string | null>(null);
   const [selectedCatalogProductIds, setSelectedCatalogProductIds] = useState<string[]>([]);
   const [isTrackingOpen, setIsTrackingOpen] = useState(false);
   const [quickViewProduct, setQuickViewProduct] = useState<Product | null>(null);
@@ -262,6 +271,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [qrCodeProduct, setQrCodeProduct] = useState<Product | null>(null);
   const [comparedProductIds, setComparedProductIds] = useState<string[]>([]);
   const [isCompareModalOpen, setIsCompareModalOpen] = useState(false);
+  const [warehouseConflicts, setWarehouseConflicts] = useState<WarehouseConflictEvent[]>([]);
   const [wishlistProductIds, setWishlistProductIds] = useState<string[]>(() => {
     try {
       const saved = localStorage.getItem('omnistore_wishlist');
@@ -278,6 +288,22 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [sortBy, setSortBy] = useState<'featured' | 'price-asc' | 'price-desc' | 'stock-desc' | 'stock-asc' | 'rating'>('featured');
   const [onlyInStock, setOnlyInStock] = useState(false);
   const [onlyLowStock, setOnlyLowStock] = useState(false);
+  const [maxDeliveryDays, setMaxDeliveryDays] = useState<number | null>(() => {
+    try {
+      const saved = localStorage.getItem('omnistore_max_delivery_days');
+      return saved !== null ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('omnistore_max_delivery_days', JSON.stringify(maxDeliveryDays));
+    } catch {
+      // ignore
+    }
+  }, [maxDeliveryDays]);
 
   // SKU Search Safe Mode (Audit Log Quarantine & Damage Cross-Reference)
   const [isSafeModeEnabled, setIsSafeModeEnabled] = useState<boolean>(() => {
@@ -606,6 +632,93 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  // Audio warning chime when simultaneous modification conflict is detected
+  const playConflictChime = useCallback(() => {
+    try {
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioContextClass) return;
+      const ctx = new AudioContextClass();
+      if (ctx.state === 'suspended') {
+        ctx.resume();
+      }
+      const freqs = [480, 360, 480, 360];
+      freqs.forEach((freq, idx) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(freq, ctx.currentTime + idx * 0.12);
+        gain.gain.setValueAtTime(0, ctx.currentTime + idx * 0.12);
+        gain.gain.linearRampToValueAtTime(0.14, ctx.currentTime + idx * 0.12 + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + idx * 0.12 + 0.1);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(ctx.currentTime + idx * 0.12);
+        osc.stop(ctx.currentTime + idx * 0.12 + 0.11);
+      });
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const dismissWarehouseConflict = useCallback((id: string) => {
+    setWarehouseConflicts(prev => prev.filter(c => c.id !== id));
+  }, []);
+
+  const resolveWarehouseConflict = useCallback(async (conflictId: string, resolution: 'override' | 'yield' | 'refresh') => {
+    try {
+      await fetch('/api/inventory/resolve-conflict', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ conflictId, resolution })
+      });
+    } catch {}
+    dismissWarehouseConflict(conflictId);
+    if (resolution === 'refresh') {
+      fetchInitialData();
+      addAlert('info', 'Inventory Synced', 'Refreshed latest server inventory state.');
+    } else if (resolution === 'override') {
+      addAlert('warning', 'Lock Overridden', 'Granted exclusive editing precedence to your console session.');
+    } else if (resolution === 'yield') {
+      addAlert('info', 'Edit Yielded', 'Yielded inventory lock to other warehouse staff member.');
+    }
+  }, [dismissWarehouseConflict, addAlert]);
+
+  const reportInventoryEditingSession = useCallback(async (sku: string, productId: string, status: 'start' | 'stop', action?: string) => {
+    try {
+      await fetch('/api/inventory/editing-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sku,
+          productId,
+          operatorId: 'OP-8821',
+          operatorName: 'Julian Vance (Console)',
+          role: 'Console Specialist',
+          action: action || 'stock_adjustment',
+          status,
+          warehouse: 'Bay Area Hub (WH-01)'
+        })
+      });
+    } catch {}
+  }, []);
+
+  const simulateWarehouseConflict = useCallback(async (sku?: string): Promise<WarehouseConflictEvent | null> => {
+    try {
+      const res = await fetch('/api/inventory/simulate-conflict', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sku })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        return data.conflict;
+      }
+    } catch (e) {
+      console.error('Error simulating conflict:', e);
+    }
+    return null;
+  }, []);
+
   // Check and dispatch automated notifications for triggered price alerts
   const checkAndTriggerInventoryAlerts = useCallback((productId: string, updates: { price?: number, stock?: number }, prodName?: string, lowStockThreshold?: number) => {
     setInventoryAlerts(prevAlerts => {
@@ -755,6 +868,17 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
             checkAndTriggerInventoryAlerts(item.id, { price: item.price }, item.name);
           }
         }
+        if (data.payload.activeConflicts) {
+          setWarehouseConflicts(data.payload.activeConflicts);
+        }
+      } else if (data.type === 'warehouse:conflict') {
+        const conflict: WarehouseConflictEvent = data.payload;
+        setWarehouseConflicts(prev => {
+          if (prev.some(c => c.id === conflict.id)) return prev;
+          return [conflict, ...prev];
+        });
+        playConflictChime();
+        addAlert('critical', '⚠️ Real-Time Warehouse Conflict', conflict.message);
       } else if (data.type === 'inventory:update') {
         const { productId, stock, reserved } = data.payload;
         setProducts(prev => prev.map(p => {
@@ -1110,6 +1234,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       `Loaded ${selectedCatalogProductIds.length} SKU${selectedCatalogProductIds.length > 1 ? 's' : ''} into the warehouse Bulk Inventory Update queue.`
     );
   }, [selectedCatalogProductIds, addAlert, setAdminSelectedProductIds, setAdminActiveTab, setIsAdminOpen]);
+
+  const openAdminForProduct = useCallback((product: Product) => {
+    setAdminTargetProductId(product.id);
+    setAdminActiveTab('inventory');
+    setIsAdminOpen(true);
+  }, []);
 
   // Payment & Checkout
   const processCheckout = async (payload: {
@@ -2128,7 +2258,17 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         tagColorMap,
         setTagColor,
         getFrequentlySearchedTogether,
-        recentSearchedSkus
+        recentSearchedSkus,
+        maxDeliveryDays,
+        setMaxDeliveryDays,
+        adminTargetProductId,
+        setAdminTargetProductId,
+        openAdminForProduct,
+        warehouseConflicts,
+        dismissWarehouseConflict,
+        resolveWarehouseConflict,
+        reportInventoryEditingSession,
+        simulateWarehouseConflict
       }}
     >
       {children}

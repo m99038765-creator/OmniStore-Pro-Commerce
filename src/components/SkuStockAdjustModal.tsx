@@ -13,7 +13,10 @@ import {
   Boxes,
   MapPin,
   ArrowRight,
-  Sparkles
+  Sparkles,
+  Zap,
+  ShieldAlert,
+  ArrowRightLeft
 } from 'lucide-react';
 import { Product } from '../types';
 import { useStore } from '../context/StoreContext';
@@ -33,12 +36,29 @@ export const SkuStockAdjustModal: React.FC<SkuStockAdjustModalProps> = ({
   onSuccess,
   onNavigateToDetails
 }) => {
-  const { restockProduct, batchAdjustStock, addAlert } = useStore();
+  const {
+    restockProduct,
+    batchAdjustStock,
+    addAlert,
+    reportInventoryEditingSession,
+    simulateWarehouseConflict,
+    warehouseConflicts
+  } = useStore();
 
   const [mode, setMode] = useState<'add' | 'subtract' | 'set'>('add');
   const [quantity, setQuantity] = useState<number>(5);
   const [reason, setReason] = useState<string>('Cycle Count Adjustment');
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Register real-time inventory editing session on open and clean up on close
+  React.useEffect(() => {
+    if (isOpen && product) {
+      reportInventoryEditingSession(product.sku, product.id, 'start', 'stock_adjustment');
+      return () => {
+        reportInventoryEditingSession(product.sku, product.id, 'stop', 'stock_adjustment');
+      };
+    }
+  }, [isOpen, product?.id, product?.sku, reportInventoryEditingSession]);
 
   if (!isOpen || !product) return null;
 
@@ -101,17 +121,53 @@ export const SkuStockAdjustModal: React.FC<SkuStockAdjustModalProps> = ({
               <p className="text-[11px] font-mono text-emerald-400">SKU: {product.sku}</p>
             </div>
           </div>
-          <button
-            id="close-sku-stock-adjust-btn"
-            onClick={onClose}
-            className="p-1.5 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              id={`simulate-conflict-btn-${product.id}`}
+              type="button"
+              onClick={() => simulateWarehouseConflict(product.sku)}
+              className="px-2 py-1 rounded-lg text-[10px] font-mono font-bold bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/40 flex items-center gap-1 transition-colors cursor-pointer"
+              title="Test real-time simultaneous edit conflict toast"
+            >
+              <Zap className="w-3 h-3 text-amber-400" />
+              <span>Test Collision</span>
+            </button>
+            <button
+              id="close-sku-stock-adjust-btn"
+              onClick={onClose}
+              className="p-1.5 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         {/* Modal Body */}
         <div className="p-5 space-y-4">
+          {/* Active Conflict Warning Banner if this SKU is being edited simultaneously */}
+          {(() => {
+            const conflict = warehouseConflicts.find(c => c.sku === product.sku);
+            if (!conflict) return null;
+            return (
+              <div
+                id={`modal-active-conflict-banner-${product.id}`}
+                className="p-3 rounded-xl bg-amber-950/60 border border-amber-500/80 flex items-start gap-2.5 text-xs text-amber-200 animate-pulse"
+              >
+                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="font-bold text-amber-300 uppercase tracking-wide text-[10px]">
+                      Simultaneous Conflict Active
+                    </span>
+                    <span className="font-mono text-[10px] text-neutral-400">{conflict.timestamp}</span>
+                  </div>
+                  <p className="text-[11px] text-neutral-300 mt-0.5 leading-snug">
+                    {conflict.userB.operatorName} is also adjusting stock for this item in real-time.
+                  </p>
+                </div>
+              </div>
+            );
+          })()}
           {/* Target Product Summary */}
           <div className="p-3 rounded-xl bg-neutral-950 border border-neutral-800 flex items-center gap-3">
             <img

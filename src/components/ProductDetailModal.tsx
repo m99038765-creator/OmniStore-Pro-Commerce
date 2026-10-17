@@ -29,18 +29,22 @@ import {
   Filter,
   SlidersHorizontal,
   ChevronDown,
-  Plus
+  Plus,
+  Activity,
+  TrendingUp
 } from 'lucide-react';
 import { Product, ProductReview } from '../types';
 import { useStore } from '../context/StoreContext';
 import { SkuAuditLogModal } from './SkuAuditLogModal';
 import { TransitEstimationBadge } from './TransitEstimationBadge';
 import { QuickShipIndicator } from './QuickShipIndicator';
+import { ProductStockVelocityChart } from './ProductStockVelocityChart';
 
 export const ProductDetailModal: React.FC = () => {
   const {
     quickViewProduct,
     setQuickViewProduct,
+    openAdminForProduct,
     setQrCodeProduct,
     addToCart,
     setIsCartOpen,
@@ -375,6 +379,18 @@ export const ProductDetailModal: React.FC = () => {
                     >
                       <ClipboardList className="w-3 h-3" />
                       <span>Audit</span>
+                    </button>
+                    <button
+                      id={`modal-velocity-btn-${product.id}`}
+                      onClick={() => {
+                        const el = document.getElementById('product-stock-velocity-section');
+                        el?.scrollIntoView({ behavior: 'smooth' });
+                      }}
+                      className="inline-flex items-center gap-1.5 text-[11px] font-mono text-sky-400 hover:text-sky-300 bg-sky-500/10 hover:bg-sky-500/20 px-2 py-0.5 rounded-lg border border-sky-500/30 transition-colors shadow-xs cursor-pointer"
+                      title="View daily outflow stock velocity line chart"
+                    >
+                      <Activity className="w-3 h-3 text-sky-400" />
+                      <span>Velocity</span>
                     </button>
                   </div>
                   <button
@@ -841,6 +857,19 @@ export const ProductDetailModal: React.FC = () => {
                         <ClipboardList className="w-3.5 h-3.5 text-amber-400" />
                         <span>Audit</span>
                       </button>
+
+                      <button
+                        id="modal-stock-velocity-button"
+                        onClick={() => {
+                          const el = document.getElementById('product-stock-velocity-section');
+                          el?.scrollIntoView({ behavior: 'smooth' });
+                        }}
+                        className="text-xs font-semibold py-2 px-3.5 rounded-xl border border-sky-500/40 bg-sky-500/10 hover:bg-sky-500/20 text-sky-300 flex items-center gap-2 transition-all shadow-sm cursor-pointer"
+                        title="View daily outflow velocity line chart and proactive restock timeline"
+                      >
+                        <TrendingUp className="w-3.5 h-3.5 text-sky-400" />
+                        <span>Stock Velocity</span>
+                      </button>
                     </div>
 
                     {comparedProductIds.length > 0 && (
@@ -912,6 +941,15 @@ export const ProductDetailModal: React.FC = () => {
               </div>
 
             </div>
+
+            {/* Inventory Stock Velocity (Daily Outflow) & Proactive Restock Planning */}
+            <ProductStockVelocityChart
+              product={product}
+              onOpenRestockAdmin={() => {
+                setQuickViewProduct(null);
+                openAdminForProduct(product);
+              }}
+            />
 
             {/* Customer Reviews & Feedback Section */}
             <div

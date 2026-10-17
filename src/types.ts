@@ -37,6 +37,7 @@ export interface Product {
   warranty: string;
   warehouseTags?: string[];
   isRelatedCluster?: boolean;
+  reservedBy?: string;
 }
 
 export interface SavedAddress {
@@ -181,8 +182,35 @@ export interface Order {
   }[];
 }
 
+export interface WarehouseConflictEvent {
+  id: string;
+  sku: string;
+  productId: string;
+  productName: string;
+  productImage?: string;
+  warehouse: string;
+  userA: {
+    operatorId: string;
+    operatorName: string;
+    role?: string;
+    avatarColor?: string;
+  };
+  userB: {
+    operatorId: string;
+    operatorName: string;
+    role?: string;
+    avatarColor?: string;
+  };
+  timestamp: string;
+  message: string;
+  currentStock: number;
+  attemptedAction: 'stock_adjustment' | 'batch_update' | 'quick_restock' | 'cycle_count';
+  resolved?: boolean;
+  resolutionType?: 'override' | 'yield' | 'refresh';
+}
+
 export interface RealtimeMessage {
-  type: 'inventory:sync' | 'inventory:update' | 'inventory:alert' | 'activity:purchase' | 'stats:update' | 'price:update' | 'price:alert' | 'review:add' | 'review:vote';
+  type: 'inventory:sync' | 'inventory:update' | 'inventory:alert' | 'activity:purchase' | 'stats:update' | 'price:update' | 'price:alert' | 'review:add' | 'review:vote' | 'warehouse:conflict' | 'warehouse:editing_session';
   payload: any;
   timestamp: string;
 }
@@ -374,6 +402,46 @@ export interface QuickShipReadiness {
   cutoffCountdownText: string; // e.g. "Order within 2h 45m for next 4h wave"
   reason: string;
   confidenceScore: number;
+}
+
+export interface RestockProcurementItem {
+  productId: string;
+  sku: string;
+  name: string;
+  image: string;
+  category: string;
+  warehouse: string;
+  currentStock: number;
+  reserved: number;
+  availableStock: number;
+  dailyVelocity: number;
+  velocityTrend: 'accelerating' | 'steady' | 'cooling';
+  projectedStockoutHours: number;
+  projectedStockoutDays: number;
+  projectedStockoutDate: string; // ISO date string
+  projectedStockoutDateLabel: string; // e.g. "Tomorrow at 14:30" or "Oct 18, 2026 (in 22h)"
+  recommendedOrderQty: number;
+  unitWholesaleCost: number;
+  totalCost: number;
+  leadTimeDays: number;
+  urgency: 'critical' | 'high' | 'moderate' | 'stable';
+  includedInDraft: boolean;
+}
+
+export interface RestockProcurementDraft {
+  poNumber: string;
+  createdAt: string;
+  targetWarehouse: string;
+  targetDeliveryDate: string;
+  items: RestockProcurementItem[];
+  totalUnits: number;
+  totalEstimatedCost: number;
+  status: 'draft' | 'approved' | 'transmitted';
+  simulationParameters: {
+    surgeMultiplier: number;
+    leadTimeDays: number;
+    safetyBufferDays: number;
+  };
 }
 
 

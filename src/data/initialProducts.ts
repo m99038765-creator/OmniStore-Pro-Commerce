@@ -13,7 +13,8 @@ export const INITIAL_PRODUCTS: Product[] = [
     rating: 4.9,
     reviewCount: 142,
     stock: 7,
-    reserved: 0,
+    reserved: 2,
+    reservedBy: 'Sarah Jenkins (Shift B - Bay Area Hub)',
     lowStockThreshold: 4,
     warehouse: 'Bay Area Hub (WH-01)',
     images: [
@@ -159,7 +160,8 @@ export const INITIAL_PRODUCTS: Product[] = [
     rating: 5.0,
     reviewCount: 64,
     stock: 4,
-    reserved: 0,
+    reserved: 1,
+    reservedBy: 'Marcus Thorne (Station A2 - Bay Area)',
     lowStockThreshold: 3,
     warehouse: 'Bay Area Hub (WH-01)',
     images: [

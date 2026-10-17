@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Navigation, Star, ShoppingBag, Eye, ShieldAlert, Check, MapPin, Sparkles, Scale, Heart, QrCode, BellRing, Zap, Barcode, AlertTriangle, CheckSquare, Square, Lock, Tag, Network } from 'lucide-react';
+import { Navigation, Star, ShoppingBag, Eye, ShieldAlert, Check, MapPin, Sparkles, Scale, Heart, QrCode, BellRing, Zap, Barcode, AlertTriangle, CheckSquare, Square, Lock, Tag, Network, Sliders } from 'lucide-react';
 import { Product } from '../types';
 import { getDistanceToWarehouse, MOCK_USER_LOCATION } from '../utils/distance';
 import { useStore } from '../context/StoreContext';
@@ -31,7 +31,8 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
     reserveItem,
     isReserved,
     showWarehouseTags,
-    tagColorMap
+    tagColorMap,
+    openAdminForProduct
   } = useStore();
   const itemReserved = isReserved(product.id);
   const [justAdded, setJustAdded] = useState(false);
@@ -270,6 +271,19 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
           >
             <Eye className="w-4 h-4" />
           </button>
+
+          <button
+            id={`quick-edit-overlay-btn-${product.id}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              openAdminForProduct(product);
+            }}
+            className="p-2 rounded-xl bg-neutral-900/85 hover:bg-neutral-800 border border-neutral-700/60 text-sky-400 opacity-80 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity backdrop-blur-md hover:text-sky-300"
+            title="Quick Edit in Warehouse Admin (Stock & Price)"
+            aria-label="Quick Edit in Warehouse Admin"
+          >
+            <Sliders className="w-3.5 h-3.5" />
+          </button>
         </div>
 
         {/* Warehouse Tag */}
@@ -345,6 +359,20 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
               >
                 <QrCode className="w-3 h-3 text-emerald-400 shrink-0" />
                 <span>View QR</span>
+              </button>
+
+              <button
+                type="button"
+                id={`quick-edit-btn-${product.id}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openAdminForProduct(product);
+                }}
+                title={`Quick Edit ${product.sku} in Warehouse Admin Modal (Update Stock or Price)`}
+                className="inline-flex items-center gap-1 font-mono text-[10px] px-2 py-0.5 rounded bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 hover:text-sky-200 border border-sky-500/30 hover:border-sky-500/60 transition-all cursor-pointer font-medium active:scale-95 shadow-xs"
+              >
+                <Sliders className="w-3 h-3 text-sky-400 shrink-0" />
+                <span>Quick Edit</span>
               </button>
             </div>
 

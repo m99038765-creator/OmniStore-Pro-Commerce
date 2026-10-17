@@ -25,7 +25,10 @@ import {
   ClipboardList,
   Printer,
   Search,
-  AlertCircle
+  AlertCircle,
+  Lock,
+  Check,
+  Tag
 } from 'lucide-react';
 import { useStore } from '../context/StoreContext';
 import { Product } from '../types';
@@ -38,6 +41,7 @@ import { SkuAuditLogModal } from './SkuAuditLogModal';
 import { BulkQrCodeModal } from './BulkQrCodeModal';
 import { VoiceDictationButton } from './VoiceDictationButton';
 import { WarehouseAiSkuSuggestions } from './WarehouseAiSkuSuggestions';
+import { ReservationConflictAlertModal } from './ReservationConflictAlertModal';
 
 export const WarehouseAdminModal: React.FC = () => {
   const {
@@ -60,7 +64,11 @@ export const WarehouseAdminModal: React.FC = () => {
     setSkuAdjustProduct,
     offlineInventoryQueue,
     syncOfflineInventory,
-    isReserved
+    isReserved,
+    adminTargetProductId,
+    setAdminTargetProductId,
+    updateProductPrice,
+    addAlert
   } = useStore();
 
   const [scannerProductId, setScannerProductId] = useState<string | null>(null);
@@ -69,6 +77,8 @@ export const WarehouseAdminModal: React.FC = () => {
   const [restockQty, setRestockQty] = useState(5);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
   const [isDroppingPrice, setIsDroppingPrice] = useState(false);
+  const [editingPriceId, setEditingPriceId] = useState<string | null>(null);
+  const [editPriceValue, setEditPriceValue] = useState<string>('');
 
   // Bulk QR Code Generation State
   const [isBulkQrOpen, setIsBulkQrOpen] = useState(false);
@@ -104,6 +114,36 @@ export const WarehouseAdminModal: React.FC = () => {
   const reservedConflicts = useMemo(() => {
     return products.filter(p => adminSelectedProductIds.includes(p.id) && (p.reserved > 0 || isReserved(p.id)));
   }, [products, adminSelectedProductIds, isReserved]);
+
+  // Active Reservation Conflict Helper States
+  const [conflictCandidate, setConflictCandidate] = useState<Product | null>(null);
+  const [bulkConflictCandidates, setBulkConflictCandidates] = useState<Product[] | null>(null);
+
+  const handleToggleBatchSelection = (product: Product) => {
+    const isSelected = adminSelectedProductIds.includes(product.id);
+    if (isSelected) {
+      setAdminSelectedProductIds(prev => prev.filter(id => id !== product.id));
+      return;
+    }
+
+    // Checking if product has active reserved status by staff
+    const hasActiveReservation = product.reserved > 0 || isReserved(product.id);
+    if (hasActiveReservation) {
+      setConflictCandidate(product);
+      return;
+    }
+
+    setAdminSelectedProductIds(prev => [...prev, product.id]);
+  };
+
+  const handleConfirmAddConflictedProduct = (product: Product) => {
+    setAdminSelectedProductIds(prev => Array.from(new Set([...prev, product.id])));
+    addAlert(
+      'warning',
+      '⚠️ Added with Active Conflict',
+      `SKU ${product.sku} has an active reservation hold by ${product.reservedBy || 'Staff Member'}. Added to batch update.`
+    );
+  };
 
   const recordSkuAccess = (productId: string) => {
     setAccessCounts(prev => {
@@ -223,6 +263,36 @@ export const WarehouseAdminModal: React.FC = () => {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isAdminOpen, setIsAdminOpen, setAdminActiveTab]);
+
+  useEffect(() => {
+    if (isAdminOpen && adminTargetProductId) {
+      const targetProd = products.find(p => p.id === adminTargetProductId);
+      if (targetProd) {
+        setAdminActiveTab('inventory');
+        setSkuFilterCategory('all');
+        setSkuFilterWarehouse('all');
+        setSkuFilterSearch(targetProd.sku);
+        setHighlightedProductId(adminTargetProductId);
+        setTimeout(() => {
+          const targetElement = document.getElementById(`admin-stock-row-${adminTargetProductId}`);
+          if (targetElement) {
+            targetElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }
+        }, 150);
+      }
+    }
+  }, [isAdminOpen, adminTargetProductId, products, setAdminActiveTab]);
+
+  const handleSavePrice = async (productId: string) => {
+    const parsed = parseFloat(editPriceValue);
+    if (isNaN(parsed) || parsed <= 0) return;
+    const ok = await updateProductPrice(productId, parsed);
+    if (ok) {
+      setActionSuccess(`Updated price to $${parsed.toFixed(2)}.`);
+      setTimeout(() => setActionSuccess(null), 3000);
+      setEditingPriceId(null);
+    }
+  };
 
   if (!isAdminOpen) return null;
 
@@ -553,23 +623,52 @@ export const WarehouseAdminModal: React.FC = () => {
                 {reservedConflicts.length > 0 && (
                   <div
                     id="admin-reservation-conflict-banner"
-                    className="mb-4 p-3.5 rounded-xl bg-amber-950/60 border border-amber-500/80 flex flex-wrap items-center justify-between gap-3 text-xs shadow-lg shadow-amber-950/30 animate-in fade-in"
+                    className="mb-4 p-3.5 rounded-xl bg-gradient-to-r from-amber-950/80 via-neutral-900 to-amber-950/70 border border-amber-500/80 flex flex-wrap items-center justify-between gap-3 text-xs shadow-lg shadow-amber-950/40 animate-in fade-in"
                   >
                     <div className="flex items-center gap-2.5">
-                      <div className="w-8 h-8 rounded-lg bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400 shrink-0">
-                        <AlertTriangle className="w-4 h-4" />
+                      <div className="w-9 h-9 rounded-xl bg-amber-500/20 border border-amber-500/50 flex items-center justify-center text-amber-400 shrink-0">
+                        <AlertTriangle className="w-5 h-5 stroke-[2.5] animate-pulse" />
                       </div>
                       <div>
-                        <p className="text-amber-200 font-bold">Active Reservation Conflict Detected</p>
-                        <p className="text-amber-300/80 text-[11px]">
-                          {reservedConflicts.length} selected SKU{reservedConflicts.length > 1 ? 's' : ''} ({reservedConflicts.map(p => p.sku).join(', ')}) currently have active stock reservations by staff members. Batch updating may conflict with pending orders.
+                        <div className="flex items-center gap-2">
+                          <p className="text-amber-200 font-bold">Active Reservation Conflict Detected</p>
+                          <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold uppercase">
+                            {reservedConflicts.length} Conflicted Item{reservedConflicts.length > 1 ? 's' : ''}
+                          </span>
+                        </div>
+                        <p className="text-amber-300/90 text-[11px] mt-0.5">
+                          {reservedConflicts.map(p => `${p.sku} (${p.reserved || 1} reserved by ${p.reservedBy || 'Staff'})`).join(' • ')}
+                        </p>
+                        <p className="text-neutral-400 text-[10px] mt-0.5">
+                          Batch updating stock for reserved inventory may conflict with active customer order holds.
                         </p>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      <span className="font-mono text-[10px] px-2 py-1 rounded bg-amber-900/60 text-amber-200 border border-amber-500/40 font-bold">
-                        Conflict Warning
-                      </span>
+                      <button
+                        id="admin-auto-resolve-conflicts-btn"
+                        type="button"
+                        onClick={() => {
+                          const conflictIds = reservedConflicts.map(p => p.id);
+                          setAdminSelectedProductIds(prev => prev.filter(id => !conflictIds.includes(id)));
+                          addAlert('info', 'Conflicts Resolved', `Removed ${conflictIds.length} reserved item(s) from the batch.`);
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-neutral-950 font-bold text-xs flex items-center gap-1.5 transition-colors cursor-pointer shadow-md shadow-amber-500/20 active:scale-95"
+                        title="Remove all items with active staff reservations from batch selection"
+                      >
+                        <Check className="w-3.5 h-3.5 stroke-[2.5]" />
+                        <span>Auto-Resolve: Exclude Reserved ({reservedConflicts.length})</span>
+                      </button>
+
+                      <button
+                        id="admin-view-batch-with-conflict-btn"
+                        type="button"
+                        onClick={() => setAdminActiveTab('batch')}
+                        className="px-2.5 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-750 text-neutral-300 hover:text-white border border-neutral-700 text-xs font-medium cursor-pointer"
+                        title="Open batch adjuster"
+                      >
+                        <span>Open Batch Tab</span>
+                      </button>
                     </div>
                   </div>
                 )}
@@ -614,6 +713,95 @@ export const WarehouseAdminModal: React.FC = () => {
                     </div>
                   </div>
                 )}
+
+                {/* Active Quick Edit Banner for Targeted SKU */}
+                {adminTargetProductId && (() => {
+                  const targetProd = products.find(p => p.id === adminTargetProductId);
+                  if (!targetProd) return null;
+                  return (
+                    <div
+                      id="admin-quick-edit-target-banner"
+                      className="mb-3.5 p-3.5 rounded-xl bg-gradient-to-r from-sky-950/90 via-neutral-900 to-sky-950/80 border border-sky-500/60 flex flex-wrap items-center justify-between gap-3 text-xs shadow-lg shadow-sky-950/50"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="p-2 rounded-lg bg-sky-500/20 border border-sky-500/40 text-sky-400 shrink-0">
+                          <Sliders className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-neutral-300 font-semibold uppercase tracking-wider text-[11px]">Quick Edit Item:</span>
+                            <span className="font-mono text-sky-300 font-bold text-xs bg-sky-950 px-2 py-0.5 rounded border border-sky-500/40">{targetProd.sku}</span>
+                            <span className="text-white font-medium truncate max-w-xs">{targetProd.name}</span>
+                          </div>
+                          <div className="flex items-center gap-3 text-[11px] mt-1 text-neutral-300 font-mono">
+                            <span className="flex items-center gap-1">
+                              Stock: <strong className={targetProd.stock <= 0 ? 'text-rose-400' : targetProd.stock <= targetProd.lowStockThreshold ? 'text-amber-400' : 'text-emerald-400'}>{targetProd.stock} units</strong>
+                            </span>
+                            <span>•</span>
+                            <span>
+                              Price: <strong className="text-sky-300">${targetProd.price.toFixed(2)}</strong>
+                            </span>
+                            <span>•</span>
+                            <span className="text-neutral-400">Hub: {targetProd.warehouse.split('(')[0].trim()}</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <button
+                          type="button"
+                          id="admin-target-adjust-stock-btn"
+                          onClick={() => handleOpenStockAdjust(targetProd)}
+                          className="px-2.5 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/50 text-xs font-medium flex items-center gap-1 cursor-pointer transition-colors active:scale-95"
+                          title="Open Stock Adjustment Modal to set or adjust inventory count"
+                        >
+                          <Sliders className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>Adjust Stock</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          id="admin-target-edit-price-btn"
+                          onClick={() => {
+                            setEditingPriceId(targetProd.id);
+                            setEditPriceValue(targetProd.price.toString());
+                            handleJumpToSkuRow(targetProd.id);
+                          }}
+                          className="px-2.5 py-1.5 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 text-sky-300 border border-sky-500/50 text-xs font-medium flex items-center gap-1 cursor-pointer transition-colors active:scale-95"
+                          title="Edit unit price directly"
+                        >
+                          <span>Edit Price</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          id="admin-target-restock-btn"
+                          onClick={() => handleRestock(targetProd.id)}
+                          disabled={restockingId === targetProd.id}
+                          className="px-2.5 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-emerald-400 border border-neutral-700 text-xs font-medium flex items-center gap-1 cursor-pointer transition-colors active:scale-95"
+                          title={`Quick Restock +${restockQty} units`}
+                        >
+                          <PackagePlus className="w-3.5 h-3.5" />
+                          <span>+{restockQty}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          id="admin-target-view-all-btn"
+                          onClick={() => {
+                            setAdminTargetProductId(null);
+                            setSkuFilterSearch('');
+                            setHighlightedProductId(null);
+                          }}
+                          className="px-2.5 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-750 text-neutral-300 hover:text-white border border-neutral-700 text-xs font-medium cursor-pointer transition-colors"
+                          title="Clear quick edit focus and view all catalog SKUs"
+                        >
+                          View All SKUs
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 {/* AI-Powered SKU Suggestion Engine */}
                 <WarehouseAiSkuSuggestions
@@ -721,11 +909,17 @@ export const WarehouseAdminModal: React.FC = () => {
                       id="admin-select-all-filtered-btn"
                       onClick={() => {
                         const filteredIds = filteredInventoryProducts.map(p => p.id);
-                        const allSelected = filteredIds.every(id => adminSelectedProductIds.includes(id));
+                        const allSelected = filteredIds.length > 0 && filteredIds.every(id => adminSelectedProductIds.includes(id));
                         if (allSelected) {
                           setAdminSelectedProductIds(prev => prev.filter(id => !filteredIds.includes(id)));
                         } else {
-                          setAdminSelectedProductIds(prev => Array.from(new Set([...prev, ...filteredIds])));
+                          const unselected = filteredInventoryProducts.filter(p => !adminSelectedProductIds.includes(p.id));
+                          const reservedInView = unselected.filter(p => p.reserved > 0 || isReserved(p.id));
+                          if (reservedInView.length > 0) {
+                            setBulkConflictCandidates(reservedInView);
+                          } else {
+                            setAdminSelectedProductIds(prev => Array.from(new Set([...prev, ...filteredIds])));
+                          }
                         }
                       }}
                       className="px-2.5 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
@@ -837,16 +1031,22 @@ export const WarehouseAdminModal: React.FC = () => {
                             type="button"
                             onClick={(e) => {
                               e.stopPropagation();
-                              setAdminSelectedProductIds(prev =>
-                                prev.includes(product.id)
-                                  ? prev.filter(id => id !== product.id)
-                                  : [...prev, product.id]
-                              );
+                              handleToggleBatchSelection(product);
                             }}
-                            title={isSelected ? 'Deselect from batch' : 'Select SKU for batch stock adjustment'}
+                            title={
+                              isSelected
+                                ? 'Deselect from batch'
+                                : (product.reserved > 0 || isReserved(product.id))
+                                ? `Active hold: ${product.reserved || 1} units reserved by ${product.reservedBy || 'Staff'} - click to evaluate conflict`
+                                : 'Select SKU for batch stock adjustment'
+                            }
                             className={`w-5 h-5 rounded-md flex items-center justify-center border transition-colors shrink-0 cursor-pointer ${
                               isSelected
-                                ? 'bg-sky-500 border-sky-400 text-neutral-950'
+                                ? (product.reserved > 0 || isReserved(product.id))
+                                  ? 'bg-amber-500 border-amber-400 text-neutral-950 ring-2 ring-amber-500/30'
+                                  : 'bg-sky-500 border-sky-400 text-neutral-950'
+                                : (product.reserved > 0 || isReserved(product.id))
+                                ? 'border-amber-500/80 bg-amber-950/40 hover:border-amber-400 text-transparent'
                                 : 'border-neutral-700 bg-neutral-950 hover:border-neutral-500 text-transparent'
                             }`}
                           >
@@ -872,20 +1072,70 @@ export const WarehouseAdminModal: React.FC = () => {
                               <span className="text-[10px] font-mono text-neutral-500 bg-neutral-950 px-1.5 py-0.5 rounded border border-neutral-800">
                                 {product.sku}
                               </span>
-                              {product.reserved > 0 && (
+                              {(product.reserved > 0 || isReserved(product.id)) && (
                                 <span
-                                  className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-300 bg-amber-950/80 px-1.5 py-0.5 rounded border border-amber-500/50"
-                                  title={`Active reservation hold: ${product.reserved} units locked`}
+                                  id={`admin-row-reserved-pill-${product.id}`}
+                                  className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-300 bg-amber-950/80 px-1.5 py-0.5 rounded border border-amber-500/50 shadow-xs"
+                                  title={`Active reservation hold: ${product.reserved || 1} units locked by ${product.reservedBy || 'Staff Member'}`}
                                 >
                                   <Lock className="w-2.5 h-2.5 text-amber-400" />
-                                  <span>{product.reserved} Reserved</span>
+                                  <span>{product.reserved || 1} Reserved</span>
                                 </span>
                               )}
                             </div>
                             <div className="flex items-center gap-3 text-[11px] text-neutral-400 mt-0.5">
-                              <span className="font-mono text-emerald-400 font-medium">
-                                ${product.price.toFixed(2)}
-                              </span>
+                              {editingPriceId === product.id ? (
+                                <form
+                                  onSubmit={(e) => {
+                                    e.preventDefault();
+                                    handleSavePrice(product.id);
+                                  }}
+                                  className="inline-flex items-center gap-1 bg-neutral-950 p-1 rounded-md border border-sky-500 shadow-md"
+                                >
+                                  <span className="text-neutral-400 font-mono text-xs">$</span>
+                                  <input
+                                    id={`admin-edit-price-input-${product.id}`}
+                                    type="number"
+                                    step="0.01"
+                                    min="0.01"
+                                    value={editPriceValue}
+                                    onChange={(e) => setEditPriceValue(e.target.value)}
+                                    className="w-20 px-1 py-0.5 rounded bg-neutral-900 border border-neutral-700 text-white font-mono text-xs focus:outline-none focus:border-sky-400"
+                                    autoFocus
+                                    placeholder="0.00"
+                                  />
+                                  <button
+                                    id={`admin-save-price-btn-${product.id}`}
+                                    type="submit"
+                                    className="p-1 rounded bg-sky-500 hover:bg-sky-400 text-neutral-950 font-bold cursor-pointer transition-colors"
+                                    title="Save updated price"
+                                  >
+                                    <Check className="w-3 h-3 stroke-[2.5]" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditingPriceId(null)}
+                                    className="p-1 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-300 cursor-pointer transition-colors"
+                                    title="Cancel price edit"
+                                  >
+                                    <X className="w-3 h-3" />
+                                  </button>
+                                </form>
+                              ) : (
+                                <button
+                                  type="button"
+                                  id={`admin-price-btn-${product.id}`}
+                                  onClick={() => {
+                                    setEditingPriceId(product.id);
+                                    setEditPriceValue(product.price.toString());
+                                  }}
+                                  className="group/price inline-flex items-center gap-1 font-mono text-emerald-400 hover:text-emerald-300 font-medium cursor-pointer hover:underline"
+                                  title="Click to edit item price"
+                                >
+                                  <span>${product.price.toFixed(2)}</span>
+                                  <Sliders className="w-2.5 h-2.5 text-neutral-500 group-hover/price:text-sky-400" />
+                                </button>
+                              )}
                               <span>•</span>
                               <span className="flex items-center gap-1 font-mono text-[10px]">
                                 <MapPin className="w-3 h-3 text-neutral-500" />
@@ -972,6 +1222,21 @@ export const WarehouseAdminModal: React.FC = () => {
                             >
                               <QrCode className="w-3.5 h-3.5" />
                               <span className="hidden sm:inline">QR</span>
+                            </button>
+
+                            {/* Direct Price Edit button */}
+                            <button
+                              id={`admin-edit-price-btn-${product.id}`}
+                              onClick={() => {
+                                recordSkuAccess(product.id);
+                                setEditingPriceId(product.id);
+                                setEditPriceValue(product.price.toString());
+                              }}
+                              title="Edit unit price directly"
+                              className="px-2 py-1.5 rounded-lg bg-sky-500/10 hover:bg-sky-500/20 text-sky-300 text-xs font-mono flex items-center gap-1 transition-colors border border-sky-500/30 cursor-pointer"
+                            >
+                              <Sliders className="w-3 h-3 text-sky-400" />
+                              <span className="hidden lg:inline">Price</span>
                             </button>
 
                             {/* Drop price button */}
@@ -1072,6 +1337,45 @@ export const WarehouseAdminModal: React.FC = () => {
         initialWarehouse={skuFilterWarehouse}
         initialSearch={skuFilterSearch}
         title="Physical Inventory SKU QR Code & Label Printing Hub"
+      />
+
+      {/* Reservation Conflict Alert Modal */}
+      <ReservationConflictAlertModal
+        product={conflictCandidate}
+        bulkProducts={bulkConflictCandidates}
+        isOpen={Boolean(conflictCandidate || (bulkConflictCandidates && bulkConflictCandidates.length > 0))}
+        onClose={() => {
+          setConflictCandidate(null);
+          setBulkConflictCandidates(null);
+        }}
+        onConfirmOverride={(p) => {
+          handleConfirmAddConflictedProduct(p);
+          setConflictCandidate(null);
+        }}
+        onConfirmBulkOverride={(prods) => {
+          const allFilteredIds = filteredInventoryProducts.map(p => p.id);
+          setAdminSelectedProductIds(prev => Array.from(new Set([...prev, ...allFilteredIds])));
+          addAlert(
+            'warning',
+            '⚠️ Batch Selection Added with Conflicts',
+            `Included ${prods.length} reserved SKU(s) in batch update selection.`
+          );
+          setBulkConflictCandidates(null);
+        }}
+        onConfirmAddOnlyNonReserved={() => {
+          if (!bulkConflictCandidates) return;
+          const conflictIds = new Set(bulkConflictCandidates.map(p => p.id));
+          const safeIds = filteredInventoryProducts
+            .filter(p => !conflictIds.has(p.id))
+            .map(p => p.id);
+          setAdminSelectedProductIds(prev => Array.from(new Set([...prev, ...safeIds])));
+          addAlert(
+            'success',
+            'Safe Batch Selection Applied',
+            `Added ${safeIds.length} non-reserved SKUs to batch update. Excluded ${conflictIds.size} reserved item(s).`
+          );
+          setBulkConflictCandidates(null);
+        }}
       />
     </AnimatePresence>
   );

@@ -24,6 +24,23 @@ let orders: Order[] = [];
 let skuAuditLogs: SkuAuditLogEntry[] = JSON.parse(JSON.stringify(INITIAL_SKU_AUDIT_LOGS));
 const reservations = new Map<string, { productId: string; quantity: number; expiresAt: number }>();
 
+// Real-Time Warehouse Simultaneous Edit Tracking & Conflict State
+interface ActiveSkuEditor {
+  clientId: string;
+  ws?: WebSocket;
+  operatorId: string;
+  operatorName: string;
+  role?: string;
+  sku: string;
+  productId: string;
+  action: string;
+  startedAt: number;
+  warehouse: string;
+}
+
+const activeSkuEditors = new Map<string, ActiveSkuEditor[]>();
+const activeConflicts = new Map<string, any>();
+
 // WebSocket Server
 const wss = new WebSocketServer({ server });
 const wsClients = new Set<WebSocket>();
@@ -53,7 +70,95 @@ function broadcast(message: RealtimeMessage) {
   }
 }
 
+function registerEditorAndDetectConflict(editor: ActiveSkuEditor): { conflict: any | null; activeCount: number } {
+  const now = Date.now();
+  const sku = editor.sku.toUpperCase();
+
+  // Prune sessions older than 3 minutes or matching current client
+  const existing = (activeSkuEditors.get(sku) || []).filter(e => now - e.startedAt < 180000 && e.clientId !== editor.clientId);
+  
+  let conflict: any | null = null;
+  if (existing.length > 0) {
+    // Another user is editing this SKU simultaneously!
+    const other = existing[0];
+    const prod = inventory.find(p => p.sku === sku || p.id === editor.productId);
+
+    conflict = {
+      id: _getUniqueServerId("conflict"),
+      sku,
+      productId: prod?.id || editor.productId,
+      productName: prod?.name || sku,
+      productImage: prod?.images?.[0] || '',
+      warehouse: prod?.warehouse || editor.warehouse || 'Bay Area Hub (WH-01)',
+      currentStock: prod?.stock ?? 0,
+      userA: {
+        operatorId: editor.operatorId,
+        operatorName: editor.operatorName,
+        role: editor.role || 'Console Specialist',
+        avatarColor: '#0ea5e9'
+      },
+      userB: {
+        operatorId: other.operatorId,
+        operatorName: other.operatorName,
+        role: other.role || 'Floor Lead / Scanner',
+        avatarColor: '#f59e0b'
+      },
+      timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      message: `Simultaneous Edit Conflict: ${other.operatorName} and ${editor.operatorName} are both attempting to modify stock for SKU ${sku} (${prod?.name || ''})!`,
+      attemptedAction: editor.action || 'stock_adjustment'
+    };
+
+    activeConflicts.set(conflict.id, conflict);
+
+    // Broadcast conflict notification toast to all connected clients
+    broadcast({
+      type: 'warehouse:conflict',
+      payload: conflict,
+      timestamp: new Date().toISOString()
+    });
+  }
+
+  // Add this editor
+  existing.push(editor);
+  activeSkuEditors.set(sku, existing);
+
+  // Broadcast updated editing sessions
+  broadcast({
+    type: 'warehouse:editing_session',
+    payload: {
+      sku,
+      editorsCount: existing.length,
+      editors: existing.map(e => ({ operatorId: e.operatorId, operatorName: e.operatorName, action: e.action }))
+    },
+    timestamp: new Date().toISOString()
+  });
+
+  return { conflict, activeCount: existing.length };
+}
+
+function removeEditorSession(clientId: string, sku?: string) {
+  if (sku) {
+    const list = activeSkuEditors.get(sku.toUpperCase()) || [];
+    const filtered = list.filter(e => e.clientId !== clientId);
+    if (filtered.length > 0) {
+      activeSkuEditors.set(sku.toUpperCase(), filtered);
+    } else {
+      activeSkuEditors.delete(sku.toUpperCase());
+    }
+  } else {
+    for (const [key, list] of activeSkuEditors.entries()) {
+      const filtered = list.filter(e => e.clientId !== clientId);
+      if (filtered.length > 0) {
+        activeSkuEditors.set(key, filtered);
+      } else {
+        activeSkuEditors.delete(key);
+      }
+    }
+  }
+}
+
 wss.on('connection', (ws) => {
+  const clientId = _getUniqueServerId("client");
   wsClients.add(ws);
 
   // Send initial inventory sync on connect
@@ -62,17 +167,48 @@ wss.on('connection', (ws) => {
     payload: {
       products: inventory,
       ordersCount: orders.length,
+      activeConflicts: Array.from(activeConflicts.values())
     },
     timestamp: new Date().toISOString(),
   };
   ws.send(JSON.stringify(initialSyncMsg));
 
+  ws.on('message', (raw) => {
+    try {
+      const msg = JSON.parse(raw.toString());
+      if (msg.type === 'inventory:editing_start') {
+        const { sku, productId, operatorId, operatorName, role, action, warehouse } = msg.payload || {};
+        if (sku) {
+          registerEditorAndDetectConflict({
+            clientId,
+            ws,
+            operatorId: operatorId || 'OP-8821',
+            operatorName: operatorName || 'Warehouse Console Operator',
+            role: role || 'Console Specialist',
+            sku,
+            productId: productId || '',
+            action: action || 'stock_adjustment',
+            startedAt: Date.now(),
+            warehouse: warehouse || 'Bay Area Hub (WH-01)'
+          });
+        }
+      } else if (msg.type === 'inventory:editing_stop') {
+        const { sku } = msg.payload || {};
+        removeEditorSession(clientId, sku);
+      }
+    } catch (e) {
+      console.error('WS message parse error:', e);
+    }
+  });
+
   ws.on('close', () => {
     wsClients.delete(ws);
+    removeEditorSession(clientId);
   });
 
   ws.on('error', () => {
     wsClients.delete(ws);
+    removeEditorSession(clientId);
   });
 });
 
@@ -842,6 +978,106 @@ app.post('/api/inventory/audit-logs', (req, res) => {
 
   skuAuditLogs.unshift(entry);
   res.status(201).json({ success: true, log: entry });
+});
+
+// --- REAL-TIME WAREHOUSE CONFLICT NOTIFICATION SYSTEM ---
+
+// POST /api/inventory/editing-session - Register or stop an active SKU editing session
+app.post('/api/inventory/editing-session', (req, res) => {
+  const { sku, productId, operatorId, operatorName, role, action, status, clientId, warehouse } = req.body;
+  if (!sku) {
+    return res.status(400).json({ error: 'Missing SKU parameter' });
+  }
+
+  const cId = clientId || _getUniqueServerId("client");
+  if (status === 'stop') {
+    removeEditorSession(cId, sku);
+    return res.json({ success: true, stopped: true });
+  }
+
+  const result = registerEditorAndDetectConflict({
+    clientId: cId,
+    operatorId: operatorId || 'OP-8821',
+    operatorName: operatorName || 'Julian Vance (Console)',
+    role: role || 'Console Specialist',
+    sku: sku.trim().toUpperCase(),
+    productId: productId || '',
+    action: action || 'stock_adjustment',
+    startedAt: Date.now(),
+    warehouse: warehouse || 'Bay Area Hub (WH-01)'
+  });
+
+  res.json({
+    success: true,
+    hasConflict: Boolean(result.conflict),
+    conflict: result.conflict,
+    activeEditorsCount: result.activeCount
+  });
+});
+
+// POST /api/inventory/simulate-conflict - Trigger simulated concurrent edit collision
+app.post('/api/inventory/simulate-conflict', (req, res) => {
+  const { sku, productId } = req.body || {};
+  const prod = inventory.find(p => (sku && p.sku.toUpperCase() === sku.toUpperCase()) || (productId && p.id === productId)) || inventory[0];
+
+  const simulatedStaff = [
+    { operatorId: 'OP-4492', operatorName: 'Marcus Thorne (Shift B Floor Lead)', role: 'Shift Lead', avatarColor: '#f59e0b' },
+    { operatorId: 'OP-7731', operatorName: 'Elena Rostova (Forklift Specialist)', role: 'Forklift Specialist', avatarColor: '#ec4899' },
+    { operatorId: 'OP-3319', operatorName: 'Darius Chen (Inbound Receiving Lead)', role: 'Receiving Inspector', avatarColor: '#8b5cf6' },
+    { operatorId: 'OP-5514', operatorName: 'Aria Patel (Cycle Count Auditor)', role: 'Senior Auditor', avatarColor: '#10b981' }
+  ];
+  const otherStaff = simulatedStaff[Math.floor(Math.random() * simulatedStaff.length)];
+
+  const conflictId = _getUniqueServerId("conflict");
+  const conflictPayload = {
+    id: conflictId,
+    sku: prod.sku,
+    productId: prod.id,
+    productName: prod.name,
+    productImage: prod.images[0] || '',
+    warehouse: prod.warehouse,
+    userA: {
+      operatorId: 'OP-8821',
+      operatorName: 'Julian Vance (Active Console)',
+      role: 'Senior Floor Console Specialist',
+      avatarColor: '#0ea5e9'
+    },
+    userB: otherStaff,
+    timestamp: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+    message: `Simultaneous Edit Conflict: "${otherStaff.operatorName}" is currently modifying stock quantities for ${prod.sku} (${prod.name}) in ${prod.warehouse}!`,
+    currentStock: prod.stock,
+    attemptedAction: 'stock_adjustment'
+  };
+
+  activeConflicts.set(conflictId, conflictPayload);
+
+  broadcast({
+    type: 'warehouse:conflict',
+    payload: conflictPayload,
+    timestamp: new Date().toISOString()
+  });
+
+  res.json({ success: true, conflict: conflictPayload });
+});
+
+// GET /api/inventory/active-conflicts - Retrieve currently active conflicts and editing sessions
+app.get('/api/inventory/active-conflicts', (req, res) => {
+  res.json({
+    conflicts: Array.from(activeConflicts.values()),
+    activeEditors: Array.from(activeSkuEditors.entries()).map(([sku, editors]) => ({
+      sku,
+      editors: editors.map(e => ({ operatorId: e.operatorId, operatorName: e.operatorName, action: e.action }))
+    }))
+  });
+});
+
+// POST /api/inventory/resolve-conflict - Resolve/clear a conflict notification
+app.post('/api/inventory/resolve-conflict', (req, res) => {
+  const { conflictId, resolution } = req.body;
+  if (conflictId && activeConflicts.has(conflictId)) {
+    activeConflicts.delete(conflictId);
+  }
+  res.json({ success: true, resolution });
 });
 
 // Simulation: Simulate external shopper purchase (for demonstrating live multi-user real-time stock updates)

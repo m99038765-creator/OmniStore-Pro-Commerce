@@ -50,6 +50,7 @@ import { OrderTrackingModal } from './components/OrderTrackingModal';
 import { OrderHistoryModal } from './components/OrderHistoryModal';
 import { NewsletterSubscription } from './components/NewsletterSubscription';
 import { NotificationToasts } from './components/NotificationToasts';
+import { WarehouseConflictToast } from './components/WarehouseConflictToast';
 import { ComparisonBar } from './components/ComparisonBar';
 import { ProductComparisonModal } from './components/ProductComparisonModal';
 import { ProductQrCodeModal } from './components/ProductQrCodeModal';
@@ -59,7 +60,7 @@ import { PredictiveInsightsWidget } from './components/PredictiveInsightsWidget'
 import { UserProfileModal } from './components/UserProfileModal';
 import { ScannerModal, extractSkuFromDecodedText } from './components/ScannerModal';
 import { VoiceDictationButton } from './components/VoiceDictationButton';
-import { REGIONAL_HUBS } from './utils/transitCalculator';
+import { REGIONAL_HUBS, calculateTransitEstimation } from './utils/transitCalculator';
 import { isAuditEntryQuarantineOrDamaged } from './utils/skuAuditSafety';
 
 const StorefrontContent: React.FC = () => {
@@ -99,7 +100,9 @@ const StorefrontContent: React.FC = () => {
     recentSearchedSkus,
     comparedProductIds,
     toggleCompareProduct,
-    setIsCompareModalOpen
+    setIsCompareModalOpen,
+    maxDeliveryDays,
+    setMaxDeliveryDays
   } = useStore();
 
   const [copiedSku, setCopiedSku] = useState<string | null>(null);
@@ -270,6 +273,14 @@ const StorefrontContent: React.FC = () => {
       list = list.filter((p) => p.stock <= p.lowStockThreshold);
     }
 
+    // Delivery estimate filter (reachable from selected regional hub within 1, 2, or 3-day window)
+    if (maxDeliveryDays !== null) {
+      list = list.filter((p) => {
+        const est = calculateTransitEstimation(p.warehouse, customerDefaultWarehouse, p.stock);
+        return est.daysMin <= maxDeliveryDays;
+      });
+    }
+
     // Sorting
     if (sortBy === 'price-asc') {
       list.sort((a, b) => a.price - b.price);
@@ -296,7 +307,7 @@ const StorefrontContent: React.FC = () => {
     }
 
     return list;
-  }, [products, selectedCategory, searchQuery, skuSearchQuery, isSafeModeEnabled, checkSkuSafety, onlyInStock, onlyLowStock, onlyWishlist, wishlistProductIds, sortBy, groupRelated]);
+  }, [products, selectedCategory, searchQuery, skuSearchQuery, isSafeModeEnabled, checkSkuSafety, onlyInStock, onlyLowStock, onlyWishlist, wishlistProductIds, sortBy, groupRelated, maxDeliveryDays, customerDefaultWarehouse]);
 
   const lowStockCount = useMemo(() => {
     return products.filter((p) => p.stock <= p.lowStockThreshold).length;
@@ -1300,6 +1311,47 @@ const StorefrontContent: React.FC = () => {
               </select>
             </div>
 
+            {/* Delivery Estimate Slider Filter */}
+            <div className="flex items-center gap-2 bg-neutral-900 border border-neutral-800 px-3 py-1.5 rounded-xl text-xs text-neutral-300">
+              <div className="flex items-center gap-1.5 text-neutral-400">
+                <Truck className="w-3.5 h-3.5 text-emerald-400" />
+                <span className="font-semibold text-neutral-300 whitespace-nowrap">Delivery:</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  id="delivery-estimate-slider"
+                  type="range"
+                  min="1"
+                  max="4"
+                  step="1"
+                  value={maxDeliveryDays === null ? 4 : maxDeliveryDays}
+                  onChange={(e) => {
+                    const val = parseInt(e.target.value, 10);
+                    setMaxDeliveryDays(val === 4 ? null : val);
+                  }}
+                  className="w-18 sm:w-24 h-1.5 bg-neutral-800 rounded-lg appearance-none cursor-pointer accent-emerald-500 focus:outline-none"
+                  title="Delivery Estimate slider: filter products reachable within 1, 2, or 3 days from selected regional hub"
+                />
+                <span className={`font-mono text-[10px] sm:text-[11px] font-bold px-1.5 py-0.5 rounded border whitespace-nowrap ${
+                  maxDeliveryDays !== null
+                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                    : 'bg-neutral-800 text-neutral-400 border-neutral-700'
+                }`}>
+                  {maxDeliveryDays === null ? 'All Hubs' : `≤ ${maxDeliveryDays} Day${maxDeliveryDays > 1 ? 's' : ''}`}
+                </span>
+                {maxDeliveryDays !== null && (
+                  <button
+                    type="button"
+                    onClick={() => setMaxDeliveryDays(null)}
+                    className="text-neutral-500 hover:text-white text-[10px] underline ml-0.5 cursor-pointer"
+                    title="Clear delivery estimate filter"
+                  >
+                    Reset
+                  </button>
+                )}
+              </div>
+            </div>
+
             {/* Group Related Toggle */}
             <button
               id="group-related-toggle-btn"
@@ -1806,6 +1858,7 @@ const StorefrontContent: React.FC = () => {
       <ProductComparisonModal />
       <ComparisonBar />
       <NotificationToasts />
+      <WarehouseConflictToast />
     </div>
   );
 };

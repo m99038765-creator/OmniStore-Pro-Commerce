@@ -24,12 +24,15 @@ import {
   Info,
   SlidersHorizontal,
   TrendingUp,
-  AlertCircle
+  AlertCircle,
+  Lock,
+  Check
 } from 'lucide-react';
 import { useStore } from '../context/StoreContext';
 import { ScannerModal } from './ScannerModal';
 import { BulkQrCodeModal } from './BulkQrCodeModal';
 import { VoiceDictationButton } from './VoiceDictationButton';
+import { ReservationConflictAlertModal } from './ReservationConflictAlertModal';
 import { Product } from '../types';
 
 interface WarehouseBatchStockUpdateProps {
@@ -45,7 +48,7 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
   onFinishedSuccess,
   onSwitchToInventory
 }) => {
-  const { products, batchAdjustStock, addAlert } = useStore();
+  const { products, batchAdjustStock, addAlert, isReserved } = useStore();
 
   const [adjustmentType, setAdjustmentType] = useState<'add' | 'subtract' | 'set'>('add');
   const [adjustmentQuantity, setAdjustmentQuantity] = useState<number>(10);
@@ -55,6 +58,10 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
   const [isScannerOpen, setIsScannerOpen] = useState(false);
   const [isBulkQrOpen, setIsBulkQrOpen] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
+
+  // Active Reservation Conflict Helper State
+  const [conflictCandidate, setConflictCandidate] = useState<Product | null>(null);
+  const [bulkConflictCandidates, setBulkConflictCandidates] = useState<Product[] | null>(null);
 
   // Success notification state
   const [successReport, setSuccessReport] = useState<{
@@ -123,17 +130,46 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
     return projectedItems.reduce((sum, item) => sum + item.delta, 0);
   }, [projectedItems]);
 
-  // Toggle single product selection
+  // Active reservation conflicts among selected products
+  const reservedConflicts = useMemo(() => {
+    return products.filter(p => selectedProductIds.includes(p.id) && (p.reserved > 0 || isReserved(p.id)));
+  }, [products, selectedProductIds, isReserved]);
+
+  // Toggle single product selection with Visual Conflict Helper
   const handleToggleProduct = (productId: string) => {
-    setSelectedProductIds(prev =>
-      prev.includes(productId) ? prev.filter(id => id !== productId) : [...prev, productId]
+    if (selectedProductIds.includes(productId)) {
+      setSelectedProductIds(prev => prev.filter(id => id !== productId));
+      return;
+    }
+
+    const prod = products.find(p => p.id === productId);
+    if (prod && (prod.reserved > 0 || isReserved(prod.id))) {
+      setConflictCandidate(prod);
+      return;
+    }
+
+    setSelectedProductIds(prev => [...prev, productId]);
+  };
+
+  const handleConfirmAddConflictedProduct = (product: Product) => {
+    setSelectedProductIds(prev => Array.from(new Set([...prev, product.id])));
+    addAlert(
+      'warning',
+      '⚠️ Added with Active Conflict',
+      `SKU ${product.sku} has an active reservation hold (${product.reservedBy || 'Staff Member'}). Included in batch update.`
     );
   };
 
-  // Quick Selection Helpers
+  // Quick Selection Helpers with Conflict Detection
   const handleSelectAllVisible = () => {
     const visibleIds = filteredProducts.map(p => p.id);
-    setSelectedProductIds(prev => Array.from(new Set([...prev, ...visibleIds])));
+    const unselected = filteredProducts.filter(p => !selectedProductIds.includes(p.id));
+    const reservedInView = unselected.filter(p => p.reserved > 0 || isReserved(p.id));
+    if (reservedInView.length > 0) {
+      setBulkConflictCandidates(reservedInView);
+    } else {
+      setSelectedProductIds(prev => Array.from(new Set([...prev, ...visibleIds])));
+    }
   };
 
   const handleDeselectAll = () => {
@@ -555,7 +591,11 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
                     onClick={() => handleToggleProduct(product.id)}
                     className={`p-3 rounded-xl border transition-all cursor-pointer flex items-center justify-between gap-3 ${
                       isSelected
-                        ? 'bg-sky-950/25 border-sky-500/60 shadow-sm ring-1 ring-sky-500/30'
+                        ? (product.reserved > 0 || isReserved(product.id))
+                          ? 'bg-amber-950/30 border-amber-500/70 shadow-sm ring-1 ring-amber-500/40'
+                          : 'bg-sky-950/25 border-sky-500/60 shadow-sm ring-1 ring-sky-500/30'
+                        : (product.reserved > 0 || isReserved(product.id))
+                        ? 'bg-neutral-900/60 border-amber-500/40 hover:border-amber-400'
                         : 'bg-neutral-900/50 border-neutral-800/80 hover:border-neutral-700 hover:bg-neutral-900/80'
                     }`}
                   >
@@ -569,7 +609,11 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
                         }}
                         className={`w-5 h-5 rounded-md flex items-center justify-center border transition-colors shrink-0 ${
                           isSelected
-                            ? 'bg-sky-500 border-sky-400 text-neutral-950'
+                            ? (product.reserved > 0 || isReserved(product.id))
+                              ? 'bg-amber-500 border-amber-400 text-neutral-950'
+                              : 'bg-sky-500 border-sky-400 text-neutral-950'
+                            : (product.reserved > 0 || isReserved(product.id))
+                            ? 'border-amber-500/80 bg-amber-950/40 hover:border-amber-400 text-transparent'
                             : 'border-neutral-700 bg-neutral-950 hover:border-neutral-500 text-transparent'
                         }`}
                         aria-label={isSelected ? 'Deselect SKU' : 'Select SKU'}
@@ -586,13 +630,23 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
 
                       {/* Info */}
                       <div className="min-w-0">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
                           <span className="text-[10px] font-mono font-bold px-1.5 py-0.2 rounded bg-neutral-950 text-sky-400 border border-neutral-800">
                             {product.sku}
                           </span>
                           <h5 className="text-xs font-semibold text-white truncate max-w-xs">
                             {product.name}
                           </h5>
+                          {(product.reserved > 0 || isReserved(product.id)) && (
+                            <span
+                              id={`batch-sku-reserved-pill-${product.id}`}
+                              className="inline-flex items-center gap-1 text-[10px] font-mono font-bold text-amber-300 bg-amber-950/80 px-1.5 py-0.2 rounded border border-amber-500/50 shadow-xs"
+                              title={`Active Hold: ${product.reserved || 1} units reserved by ${product.reservedBy || 'Staff Member'}`}
+                            >
+                              <Lock className="w-2.5 h-2.5 text-amber-400 shrink-0" />
+                              <span>{product.reserved || 1} Reserved</span>
+                            </span>
+                          )}
                         </div>
                         <div className="flex items-center gap-2 text-[11px] text-neutral-400 mt-0.5">
                           <span className="font-mono text-emerald-400">${product.price.toFixed(2)}</span>
@@ -638,6 +692,50 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
 
         {/* Right Column: Uniform Adjustment Configuration & Projection (lg:col-span-5) */}
         <div className="lg:col-span-5 flex flex-col space-y-4">
+          {/* Active Reservation Conflict Alert Banner */}
+          {reservedConflicts.length > 0 && (
+            <div
+              id="batch-reservation-conflict-alert"
+              className="p-3.5 rounded-xl bg-gradient-to-r from-amber-950/90 via-neutral-900 to-amber-950/80 border border-amber-500/80 text-xs shadow-lg shadow-amber-950/50 space-y-2 animate-in fade-in"
+            >
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-2">
+                  <div className="p-1 rounded-md bg-amber-500/20 text-amber-400">
+                    <AlertTriangle className="w-4 h-4 stroke-[2.5] animate-pulse" />
+                  </div>
+                  <div>
+                    <span className="font-bold text-amber-200">
+                      Active Reservation Conflict
+                    </span>
+                    <span className="ml-1.5 font-mono text-[10px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 font-bold border border-amber-500/40">
+                      {reservedConflicts.length} SKU{reservedConflicts.length > 1 ? 's' : ''}
+                    </span>
+                  </div>
+                </div>
+                <button
+                  id="batch-auto-resolve-conflicts-btn"
+                  type="button"
+                  onClick={() => {
+                    const conflictIds = reservedConflicts.map(p => p.id);
+                    setSelectedProductIds(prev => prev.filter(id => !conflictIds.includes(id)));
+                    addAlert('info', 'Conflicts Resolved', `Excluded ${conflictIds.length} reserved SKU(s) from the batch.`);
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-neutral-950 font-bold text-[11px] cursor-pointer transition-colors shadow-sm active:scale-95 flex items-center gap-1"
+                >
+                  <Check className="w-3 h-3 stroke-[2.5]" />
+                  <span>Exclude Reserved Items ({reservedConflicts.length})</span>
+                </button>
+              </div>
+
+              <p className="text-amber-300/90 text-[11px] leading-relaxed">
+                {reservedConflicts.map(p => `${p.sku} (${p.reserved || 1} units reserved by ${p.reservedBy || 'Staff'})`).join(' • ')}
+              </p>
+              <p className="text-neutral-400 text-[10px]">
+                Applying uniform batch updates to these SKUs may overwrite active customer order holds.
+              </p>
+            </div>
+          )}
+
           <div className="bg-neutral-900/60 border border-neutral-800 rounded-2xl p-4 sm:p-5 space-y-4">
             <div>
               <div className="flex items-center justify-between">
@@ -829,6 +927,15 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
                         <span className="text-neutral-300 truncate inline-block max-w-[130px] align-middle text-[11px]">
                           {item.product.name}
                         </span>
+                        {(item.product.reserved > 0 || isReserved(item.product.id)) && (
+                          <span
+                            className="inline-flex items-center gap-1 font-mono text-[9px] text-amber-300 bg-amber-950/80 px-1.5 py-0.2 rounded border border-amber-500/40 ml-1.5 font-bold"
+                            title={`Active Hold: ${item.product.reserved || 1} units reserved by ${item.product.reservedBy || 'Staff'}`}
+                          >
+                            <Lock className="w-2.5 h-2.5 text-amber-400" />
+                            <span>{item.product.reserved || 1} Reserved</span>
+                          </span>
+                        )}
                       </div>
                       <div className="flex items-center gap-2 font-mono text-xs shrink-0">
                         <span className="text-neutral-400">{item.oldStock}</span>
@@ -945,6 +1052,45 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
         initialCategory={selectedCategory}
         initialSearch={searchQuery}
         title="Batch Stock Adjuster - Physical Inventory QR Hub"
+      />
+
+      {/* Visual Conflict Detection Helper Modal */}
+      <ReservationConflictAlertModal
+        product={conflictCandidate}
+        bulkProducts={bulkConflictCandidates}
+        isOpen={Boolean(conflictCandidate || (bulkConflictCandidates && bulkConflictCandidates.length > 0))}
+        onClose={() => {
+          setConflictCandidate(null);
+          setBulkConflictCandidates(null);
+        }}
+        onConfirmOverride={(p) => {
+          handleConfirmAddConflictedProduct(p);
+          setConflictCandidate(null);
+        }}
+        onConfirmBulkOverride={(prods) => {
+          const visibleIds = filteredProducts.map(p => p.id);
+          setSelectedProductIds(prev => Array.from(new Set([...prev, ...visibleIds])));
+          addAlert(
+            'warning',
+            '⚠️ Batch Selection Added with Conflicts',
+            `Included ${prods.length} reserved SKU(s) in batch update selection.`
+          );
+          setBulkConflictCandidates(null);
+        }}
+        onConfirmAddOnlyNonReserved={() => {
+          if (!bulkConflictCandidates) return;
+          const conflictIds = new Set(bulkConflictCandidates.map(p => p.id));
+          const safeIds = filteredProducts
+            .filter(p => !conflictIds.has(p.id))
+            .map(p => p.id);
+          setSelectedProductIds(prev => Array.from(new Set([...prev, ...safeIds])));
+          addAlert(
+            'success',
+            'Safe Batch Selection Applied',
+            `Added ${safeIds.length} non-reserved SKUs to batch update. Excluded ${conflictIds.size} reserved item(s).`
+          );
+          setBulkConflictCandidates(null);
+        }}
       />
     </div>
   );
