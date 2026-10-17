@@ -12,6 +12,7 @@ import {
   ClipboardList,
   Sparkles,
   ShieldCheck,
+  ShieldAlert,
   PackageCheck,
   Maximize2,
   ChevronRight,
@@ -21,6 +22,8 @@ import {
 import { Product, ScanLogEntry } from '../types';
 import { useStore } from '../context/StoreContext';
 import { VoiceDictationButton } from './VoiceDictationButton';
+import { playSkuSuccessSound, playSkuErrorSound } from '../utils/scannerAudio';
+import { checkSkuAuditLogSafety, isAuditEntryQuarantineOrDamaged } from '../utils/skuAuditSafety';
 
 let _globalIdCounter = 0;
 const _getUniqueId = (prefix = "id") => `${prefix}_${Date.now()}_${++_globalIdCounter}`;
@@ -70,43 +73,17 @@ function getStorageCoordinates(sku: string) {
   };
 }
 
-// Safe Web Audio API synthesizer for the classic warehouse optical scanner beep
-function playScannerBeep() {
-  try {
-    const AudioContextClass =
-      window.AudioContext ||
-      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-    if (!AudioContextClass) return;
-    const ctx = new AudioContextClass();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(1450, ctx.currentTime);
-    osc.frequency.exponentialRampToValueAtTime(1900, ctx.currentTime + 0.08);
-
-    gain.gain.setValueAtTime(0.2, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.09);
-
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start();
-    osc.stop(ctx.currentTime + 0.09);
-  } catch {
-    // Audio may be blocked until user gesture, ignore gracefully
-  }
-}
-
 export const WarehouseBarcodeScanner: React.FC<WarehouseBarcodeScannerProps> = ({
   initialProductId,
   onClose
 }) => {
-  const { products, restockProduct, setQrCodeProduct } = useStore();
+  const { products, restockProduct, setQrCodeProduct, warehouseAuditLogs } = useStore();
 
   const [selectedProductId, setSelectedProductId] = useState<string>(
     initialProductId || products[0]?.id || ''
   );
   const [scanState, setScanState] = useState<'idle' | 'scanning' | 'scanned'>('idle');
+  const [scanOutcome, setScanOutcome] = useState<'valid' | 'quarantined' | 'unknown' | null>(null);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [scanLogs, setScanLogs] = useState<ScanLogEntry[]>([]);
   const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
@@ -131,41 +108,112 @@ export const WarehouseBarcodeScanner: React.FC<WarehouseBarcodeScannerProps> = (
   const handleTriggerScan = () => {
     if (scanState === 'scanning') return;
     setScanState('scanning');
+    setScanOutcome(null);
     setFeedbackMessage(null);
 
     if (scanTimerRef.current) clearTimeout(scanTimerRef.current);
 
-    // Run 1.35s scanning optical pass
+    // Run 1.1s scanning optical pass
+    scanTimerRef.current = setTimeout(() => {
+      if (!activeProduct) return;
+
+      const safety = checkSkuAuditLogSafety(activeProduct.sku, warehouseAuditLogs);
+      const isQuarantined =
+        !safety.isSafe &&
+        (safety.flagType === 'quarantine' ||
+         safety.flagType === 'both' ||
+         safety.flaggedEntries?.some(e => isAuditEntryQuarantineOrDamaged(e).isQuarantine));
+
+      if (isQuarantined) {
+        if (soundEnabled) {
+          playSkuErrorSound();
+        }
+        setScanState('scanned');
+        setScanOutcome('quarantined');
+        setFeedbackMessage(`⚠️ QUARANTINED SKU INTERCEPTED: "${activeProduct.sku}" flagged under hold (${safety.statusLabel}). Distinct error sound emitted.`);
+
+        if (coords) {
+          const newLog: ScanLogEntry = {
+            id: _getUniqueId("scan"),
+            productId: activeProduct.id,
+            productName: activeProduct.name,
+            sku: activeProduct.sku,
+            trackingSerial: coords.serial,
+            warehouse: activeProduct.warehouse,
+            binLocation: coords.fullLocation,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+            action: 'inspection',
+            actionLabel: 'QUARANTINE ALERT (Error Tone)',
+            stockOnHand: activeProduct.stock
+          };
+          setScanLogs((prev) => [newLog, ...prev.slice(0, 9)]);
+        }
+      } else {
+        if (soundEnabled) {
+          playSkuSuccessSound();
+        }
+        setScanState('scanned');
+        setScanOutcome('valid');
+        setFeedbackMessage(`✓ VALID SKU VERIFIED: "${activeProduct.sku}" passed active inventory check. Success chime emitted.`);
+
+        if (coords) {
+          const newLog: ScanLogEntry = {
+            id: _getUniqueId("scan"),
+            productId: activeProduct.id,
+            productName: activeProduct.name,
+            sku: activeProduct.sku,
+            trackingSerial: coords.serial,
+            warehouse: activeProduct.warehouse,
+            binLocation: coords.fullLocation,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+            action: 'cycle_count',
+            actionLabel: 'Optical SKU Verified (Success Chime)',
+            stockOnHand: activeProduct.stock
+          };
+          setScanLogs((prev) => [newLog, ...prev.slice(0, 9)]);
+        }
+      }
+    }, 1100);
+  };
+
+  const handleScanUnknownTest = () => {
+    if (scanState === 'scanning') return;
+    setScanState('scanning');
+    setScanOutcome(null);
+    setFeedbackMessage(null);
+
+    if (scanTimerRef.current) clearTimeout(scanTimerRef.current);
     scanTimerRef.current = setTimeout(() => {
       if (soundEnabled) {
-        playScannerBeep();
+        playSkuErrorSound();
       }
       setScanState('scanned');
+      setScanOutcome('unknown');
+      setFeedbackMessage('✕ UNKNOWN / DEFECTIVE SKU BARCODE! Unregistered tag detected. Distinct error sound emitted.');
 
-      // Record tracking scan entry
-      if (activeProduct && coords) {
-        const newLog: ScanLogEntry = {
+      setScanLogs((prev) => [
+        {
           id: _getUniqueId("scan"),
-          productId: activeProduct.id,
-          productName: activeProduct.name,
-          sku: activeProduct.sku,
-          trackingSerial: coords.serial,
-          warehouse: activeProduct.warehouse,
-          binLocation: coords.fullLocation,
+          productId: 'probe_unknown',
+          productName: 'Unregistered Defective Barcode Tag',
+          sku: 'UNKNOWN-PROBE-999',
+          trackingSerial: 'TRK-ERR-000',
+          warehouse: 'Unknown / Non-Catalog',
+          binLocation: 'Holding Bay Isolation',
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-          action: 'cycle_count',
-          actionLabel: 'Optical SKU Verified',
-          stockOnHand: activeProduct.stock
-        };
-
-        setScanLogs((prev) => [newLog, ...prev.slice(0, 9)]);
-      }
-    }, 1350);
+          action: 'inspection',
+          actionLabel: 'UNKNOWN SKU REJECT (Error Tone)',
+          stockOnHand: 0
+        },
+        ...prev.slice(0, 9)
+      ]);
+    }, 1100);
   };
 
   const handleSelectProduct = (id: string) => {
     setSelectedProductId(id);
     setScanState('idle');
+    setScanOutcome(null);
   };
 
   const handleQuickCycleCountVerify = () => {
@@ -201,11 +249,28 @@ export const WarehouseBarcodeScanner: React.FC<WarehouseBarcodeScannerProps> = (
     const target = otherProducts.length > 0 ? otherProducts[Math.floor(Math.random() * otherProducts.length)] : products[0];
     setSelectedProductId(target.id);
     setScanState('scanning');
+    setScanOutcome(null);
     setFeedbackMessage(null);
 
     if (scanTimerRef.current) clearTimeout(scanTimerRef.current);
     scanTimerRef.current = setTimeout(() => {
-      if (soundEnabled) playScannerBeep();
+      const safety = checkSkuAuditLogSafety(target.sku, warehouseAuditLogs);
+      const isQuarantined =
+        !safety.isSafe &&
+        (safety.flagType === 'quarantine' ||
+         safety.flagType === 'both' ||
+         safety.flaggedEntries?.some(e => isAuditEntryQuarantineOrDamaged(e).isQuarantine));
+
+      if (isQuarantined) {
+        if (soundEnabled) playSkuErrorSound();
+        setScanOutcome('quarantined');
+        setFeedbackMessage(`⚠️ QUARANTINED SKU INTERCEPTED: "${target.sku}" under hold. Error buzzer emitted.`);
+      } else {
+        if (soundEnabled) playSkuSuccessSound();
+        setScanOutcome('valid');
+        setFeedbackMessage(`✓ VALID SKU VERIFIED: "${target.sku}" active. Success chime emitted.`);
+      }
+
       setScanState('scanned');
       const targetCoords = getStorageCoordinates(target.sku);
       setScanLogs((prev) => [
@@ -218,13 +283,13 @@ export const WarehouseBarcodeScanner: React.FC<WarehouseBarcodeScannerProps> = (
           warehouse: target.warehouse,
           binLocation: targetCoords.fullLocation,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-          action: 'cycle_count',
-          actionLabel: 'Random Audit Scan',
+          action: isQuarantined ? 'inspection' : 'cycle_count',
+          actionLabel: isQuarantined ? 'QUARANTINE ALERT (Error Tone)' : 'Random Audit Scan (Success Chime)',
           stockOnHand: target.stock
         },
         ...prev.slice(0, 9)
       ]);
-    }, 1300);
+    }, 1100);
   };
 
   if (!activeProduct) return null;
@@ -258,15 +323,47 @@ export const WarehouseBarcodeScanner: React.FC<WarehouseBarcodeScannerProps> = (
           <button
             id="scanner-sound-toggle-btn"
             onClick={() => setSoundEnabled(!soundEnabled)}
-            className={`p-1.5 rounded-lg border text-xs flex items-center gap-1.5 transition-colors ${
+            className={`p-1.5 rounded-lg border text-xs flex items-center gap-1.5 transition-colors cursor-pointer ${
               soundEnabled
                 ? 'bg-neutral-900 border-neutral-700 text-emerald-400 hover:bg-neutral-800'
                 : 'bg-neutral-900 border-neutral-800 text-neutral-500 hover:bg-neutral-800'
             }`}
-            title={soundEnabled ? 'Scanner Beep: On' : 'Scanner Beep: Muted'}
+            title={soundEnabled ? 'Scanner Audio: Active (Success Chime & Error Buzzer)' : 'Scanner Audio: Muted'}
           >
             {soundEnabled ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
             <span className="text-[10px] font-mono hidden sm:inline">{soundEnabled ? 'Audio On' : 'Muted'}</span>
+          </button>
+
+          {/* Quick Audio Test Previews */}
+          <button
+            id="scanner-test-chime-btn"
+            type="button"
+            onClick={() => playSkuSuccessSound()}
+            className="px-2 py-1 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[10px] font-mono transition-colors cursor-pointer"
+            title="Preview distinct success chime sound"
+          >
+            Test Chime 🔔
+          </button>
+          <button
+            id="scanner-test-error-btn"
+            type="button"
+            onClick={() => playSkuErrorSound()}
+            className="px-2 py-1 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 text-[10px] font-mono transition-colors cursor-pointer"
+            title="Preview distinct error buzzer sound"
+          >
+            Test Error ⚠️
+          </button>
+
+          {/* Unknown Barcode Probe Button (Error sound) */}
+          <button
+            id="scanner-unknown-barcode-test-btn"
+            onClick={handleScanUnknownTest}
+            disabled={scanState === 'scanning'}
+            className="px-2.5 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/40 text-rose-300 text-xs font-mono font-medium flex items-center gap-1.5 transition-colors disabled:opacity-50 cursor-pointer"
+            title="Simulate scanning an unknown or damaged barcode tag (triggers error buzzer)"
+          >
+            <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
+            <span className="hidden sm:inline">Probe Unknown Barcode</span>
           </button>
 
           {/* Random Scan Button */}
@@ -274,17 +371,17 @@ export const WarehouseBarcodeScanner: React.FC<WarehouseBarcodeScannerProps> = (
             id="scanner-random-scan-btn"
             onClick={handleScanRandom}
             disabled={scanState === 'scanning'}
-            className="px-2.5 py-1.5 rounded-lg bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-neutral-300 text-xs font-medium flex items-center gap-1.5 transition-colors disabled:opacity-50"
+            className="px-2.5 py-1.5 rounded-lg bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-neutral-300 text-xs font-medium flex items-center gap-1.5 transition-colors disabled:opacity-50 cursor-pointer"
           >
             <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-            <span className="hidden sm:inline">Scan Random Item</span>
+            <span className="hidden sm:inline">Scan Random</span>
           </button>
 
           {/* Close if inline in a modal sub-view */}
           {onClose && (
             <button
               onClick={onClose}
-              className="text-xs px-2.5 py-1.5 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-400 hover:text-white border border-neutral-800"
+              className="text-xs px-2.5 py-1.5 rounded-lg bg-neutral-900 hover:bg-neutral-800 text-neutral-400 hover:text-white border border-neutral-800 cursor-pointer"
             >
               Exit Scanner
             </button>
@@ -314,22 +411,39 @@ export const WarehouseBarcodeScanner: React.FC<WarehouseBarcodeScannerProps> = (
               size="sm"
             />
           </div>
-          {products.map((p, index) => {
+          {products.map((p) => {
             const isSelected = p.id === selectedProductId;
+            const itemSafety = checkSkuAuditLogSafety(p.sku, warehouseAuditLogs);
+            const isQuarantined =
+              !itemSafety.isSafe &&
+              (itemSafety.flagType === 'quarantine' ||
+               itemSafety.flagType === 'both' ||
+               itemSafety.flaggedEntries?.some(e => isAuditEntryQuarantineOrDamaged(e).isQuarantine));
+
             return (
               <button
                 key={p.id}
                 id={`target-sku-${p.id}`}
                 onClick={() => handleSelectProduct(p.id)}
                 disabled={scanState === 'scanning'}
-                className={`px-2.5 py-1 rounded-lg text-xs font-mono shrink-0 transition-all border flex items-center gap-1.5 ${
+                className={`px-2.5 py-1 rounded-lg text-xs font-mono shrink-0 transition-all border flex items-center gap-1.5 cursor-pointer ${
                   isSelected
-                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/60 shadow-sm font-semibold'
+                    ? isQuarantined
+                      ? 'bg-amber-500/25 text-amber-200 border-amber-500/70 shadow-sm font-semibold'
+                      : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/60 shadow-sm font-semibold'
+                    : isQuarantined
+                    ? 'bg-neutral-900 text-amber-400/80 border-amber-500/30 hover:border-amber-500/60'
                     : 'bg-neutral-900 text-neutral-400 border-neutral-800 hover:border-neutral-700 hover:text-neutral-200'
                 }`}
+                title={isQuarantined ? `SKU ${p.sku} is flagged for quarantine/damage (triggers error sound)` : `SKU ${p.sku} is valid active stock (triggers success chime)`}
               >
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                <span className={`w-1.5 h-1.5 rounded-full ${isQuarantined ? 'bg-amber-400' : 'bg-emerald-400'}`} />
                 <span>{p.sku}</span>
+                {isQuarantined && (
+                  <span className="text-[9px] px-1 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                    HOLD
+                  </span>
+                )}
               </button>
             );
           })}
@@ -459,13 +573,19 @@ export const WarehouseBarcodeScanner: React.FC<WarehouseBarcodeScannerProps> = (
               </motion.div>
             )}
 
-            {/* Scan Success Green Flash */}
+            {/* Scan Flash Feedback (Emerald for Valid, Amber for Quarantined, Rose for Unknown) */}
             {scanState === 'scanned' && (
               <motion.div
                 initial={{ opacity: 0.9 }}
                 animate={{ opacity: 0 }}
-                transition={{ duration: 0.6 }}
-                className="absolute inset-0 bg-emerald-400/25 rounded-xl pointer-events-none"
+                transition={{ duration: 0.65 }}
+                className={`absolute inset-0 rounded-xl pointer-events-none ${
+                  scanOutcome === 'quarantined'
+                    ? 'bg-amber-500/30'
+                    : scanOutcome === 'unknown'
+                    ? 'bg-rose-500/30'
+                    : 'bg-emerald-400/25'
+                }`}
               />
             )}
           </div>
@@ -479,10 +599,22 @@ export const WarehouseBarcodeScanner: React.FC<WarehouseBarcodeScannerProps> = (
                   ACQUIRING LASER LOCK...
                 </span>
               )}
-              {scanState === 'scanned' && (
+              {scanState === 'scanned' && scanOutcome === 'quarantined' && (
+                <span className="text-amber-400 flex items-center gap-1.5 font-semibold">
+                  <ShieldAlert className="w-3.5 h-3.5" />
+                  <span>QUARANTINE INTERCEPT (ERROR TONE)</span>
+                </span>
+              )}
+              {scanState === 'scanned' && scanOutcome === 'unknown' && (
+                <span className="text-rose-400 flex items-center gap-1.5 font-semibold">
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                  <span>UNKNOWN SKU REJECT (ERROR TONE)</span>
+                </span>
+              )}
+              {scanState === 'scanned' && scanOutcome === 'valid' && (
                 <span className="text-emerald-400 flex items-center gap-1.5 font-semibold">
                   <CheckCircle2 className="w-3.5 h-3.5" />
-                  PAYLOAD DECODED (100%)
+                  <span>SKU VERIFIED (PASS / SUCCESS CHIME)</span>
                 </span>
               )}
               {scanState === 'idle' && (

@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
-import { motion } from 'motion/react';
-import { Navigation, Star, ShoppingBag, Eye, ShieldAlert, Check, MapPin, Sparkles, Scale, Heart, QrCode, BellRing, Zap, Barcode, AlertTriangle } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
+import { Navigation, Star, ShoppingBag, Eye, ShieldAlert, Check, MapPin, Sparkles, Scale, Heart, QrCode, BellRing, Zap, Barcode, AlertTriangle, CheckSquare, Square, Lock, Tag, Network } from 'lucide-react';
 import { Product } from '../types';
 import { getDistanceToWarehouse, MOCK_USER_LOCATION } from '../utils/distance';
 import { useStore } from '../context/StoreContext';
+import { TransitEstimationBadge } from './TransitEstimationBadge';
+import { QuickShipIndicator } from './QuickShipIndicator';
 
 interface ProductCardProps {
   product: Product;
@@ -23,11 +25,19 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
     inventoryAlerts,
     setActiveInventoryAlertProduct,
     skuSearchQuery,
-    setSkuSearchQuery
+    setSkuSearchQuery,
+    selectedCatalogProductIds,
+    toggleSelectCatalogProduct,
+    reserveItem,
+    isReserved,
+    showWarehouseTags,
+    tagColorMap
   } = useStore();
+  const itemReserved = isReserved(product.id);
   const [justAdded, setJustAdded] = useState(false);
   const [justQuickBought, setJustQuickBought] = useState(false);
 
+  const isSelected = selectedCatalogProductIds.includes(product.id);
   const isOutOfStock = product.stock <= 0;
   const isLowStock = product.stock > 0 && product.stock <= product.lowStockThreshold;
   const isCompared = comparedProductIds.includes(product.id);
@@ -36,14 +46,19 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
   const distance = getDistanceToWarehouse(product.warehouse);
 
 
+  const terms = skuSearchQuery.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
+  const prodSku = product.sku.toLowerCase();
+  const cleanProdSku = prodSku.replace(/[-\s_]/g, '');
   const isSkuMatched = Boolean(
-    skuSearchQuery.trim() &&
-    (product.sku.toLowerCase().includes(skuSearchQuery.trim().toLowerCase()) ||
-     product.sku.replace(/[-\s_]/g, '').toLowerCase().includes(skuSearchQuery.trim().replace(/[-\s_]/g, '').toLowerCase()))
+    terms.length > 0 &&
+    terms.some(term => {
+      const cleanTerm = term.replace(/[-\s_]/g, '');
+      return prodSku.includes(term) || cleanProdSku.includes(cleanTerm);
+    })
   );
   const isExactSku = Boolean(
-    skuSearchQuery.trim() &&
-    product.sku.toLowerCase() === skuSearchQuery.trim().toLowerCase()
+    terms.length > 0 &&
+    terms.some(term => prodSku === term)
   );
 
   const handleAdd = (e: React.MouseEvent) => {
@@ -67,10 +82,14 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
   };
 
   return (
-    <div
+    <motion.div
       id={`product-card-${product.id}`}
-      className={`group relative flex flex-col bg-neutral-900/60 hover:bg-neutral-900 rounded-2xl overflow-hidden transition-all duration-300 shadow-sm hover:shadow-xl hover:shadow-black/40 ${
-        isSkuMatched
+      whileHover={{ scale: 1.02, y: -4 }}
+      transition={{ duration: 0.2, ease: 'easeOut' }}
+      className={`group relative flex flex-col bg-neutral-900/60 hover:bg-neutral-900 rounded-2xl overflow-hidden shadow-sm hover:shadow-2xl hover:shadow-black/60 ${
+        isSelected
+          ? 'border-2 border-sky-400 ring-2 ring-sky-500/40 shadow-lg shadow-sky-950/40 bg-sky-950/20'
+          : isSkuMatched
           ? 'border-2 border-sky-500 ring-2 ring-sky-500/30 shadow-sky-500/10'
           : isCompared
           ? 'border-2 border-emerald-500/80 ring-1 ring-emerald-500/30'
@@ -90,9 +109,35 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
           loading="lazy"
         />
 
-        {/* Live Real-time Inventory Tag */}
-        <div className="absolute top-3 left-3 flex flex-col gap-1.5 z-10">
-          {isOutOfStock ? (
+        {/* Live Real-time Inventory Tag & Multi-select Checkbox */}
+        <div className="absolute top-3 left-3 flex items-start gap-2 z-20">
+          {/* Multi-Select Checkbox */}
+          <button
+            type="button"
+            id={`product-select-checkbox-${product.id}`}
+            role="checkbox"
+            aria-checked={isSelected}
+            aria-label={`${isSelected ? 'Deselect' : 'Select'} ${product.name} for bulk actions`}
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleSelectCatalogProduct(product.id);
+            }}
+            className={`p-1.5 sm:p-2 rounded-xl border backdrop-blur-md transition-all flex items-center justify-center cursor-pointer shadow-md select-none shrink-0 ${
+              isSelected
+                ? 'bg-sky-500 text-neutral-950 border-sky-300 ring-2 ring-sky-400/40 opacity-100 scale-105 shadow-sky-500/30 font-bold'
+                : 'bg-neutral-950/85 hover:bg-neutral-900 border-neutral-700/80 text-neutral-300 hover:text-white opacity-85 hover:opacity-100 group-hover:border-sky-500/60'
+            }`}
+            title={isSelected ? `Deselect ${product.name}` : `Select ${product.name} for bulk cart or inventory update`}
+          >
+            {isSelected ? (
+              <CheckSquare className="w-4 h-4 text-neutral-950 stroke-[2.5]" />
+            ) : (
+              <Square className="w-4 h-4 text-neutral-300 stroke-[2]" />
+            )}
+          </button>
+
+          <div className="flex flex-col gap-1.5">
+            {isOutOfStock ? (
             <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-bold tracking-wide uppercase bg-neutral-950/90 text-neutral-400 border border-neutral-800 backdrop-blur-md">
               <span className="w-1.5 h-1.5 rounded-full bg-neutral-500" />
               Sold Out
@@ -114,6 +159,17 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
             </span>
           )}
 
+          {product.isRelatedCluster && (
+            <span
+              id={`related-cluster-badge-${product.id}`}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-semibold bg-purple-950/90 text-purple-300 border border-purple-500/50 backdrop-blur-md shadow-sm"
+              title="Clustered related variant / accessory"
+            >
+              <Network className="w-3 h-3 text-purple-400 shrink-0" />
+              <span>Related Variant</span>
+            </span>
+          )}
+
           {isLowStock && (
             <span
               id={`low-stock-tag-${product.id}`}
@@ -132,6 +188,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
             </span>
           )}
         </div>
+      </div>
 
         {/* Top Right Action Buttons (Wishlist, Compare & Quick View) */}
         <div className="absolute top-3 right-3 flex items-center gap-1.5 z-10">
@@ -318,6 +375,88 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
             {product.tagline}
           </p>
 
+          {/* Warehouse Tags Badges with Animated Visibility Toggle */}
+          <AnimatePresence>
+            {showWarehouseTags && product.warehouseTags && product.warehouseTags.length > 0 && (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.8, y: -6 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.8, y: -6 }}
+                transition={{ duration: 0.2, ease: 'easeOut' }}
+                className="mt-2.5 flex flex-wrap items-center gap-1.5"
+              >
+                {product.warehouseTags.map(tag => {
+                  const assignedColor = tagColorMap[tag] || tagColorMap[tag.toLowerCase()] || 'sky';
+                  let colorClasses = 'bg-sky-500/15 text-sky-300 border-sky-500/30';
+                  if (assignedColor === 'amber' || tag.toLowerCase().includes('fragile')) colorClasses = 'bg-amber-500/20 text-amber-300 border-amber-500/40 font-bold';
+                  else if (assignedColor === 'purple' || tag.toLowerCase().includes('heavy')) colorClasses = 'bg-purple-500/20 text-purple-300 border-purple-500/40 font-bold';
+                  else if (assignedColor === 'rose' || tag.toLowerCase().includes('flammable') || tag.toLowerCase().includes('hazard')) colorClasses = 'bg-rose-500/20 text-rose-300 border-rose-500/40 font-bold';
+                  else if (assignedColor === 'emerald' || tag.toLowerCase().includes('priority')) colorClasses = 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 font-bold';
+                  else if (assignedColor === 'indigo' || tag.toLowerCase().includes('oversized')) colorClasses = 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40 font-bold';
+
+                  return (
+                    <motion.span
+                      key={tag}
+                      initial={{ opacity: 0, scale: 0.8 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.8 }}
+                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono border ${colorClasses}`}
+                      title={`Warehouse Tag: ${tag}`}
+                    >
+                      <Tag className="w-2.5 h-2.5 shrink-0" />
+                      <span>{tag}</span>
+                    </motion.span>
+                  );
+                })}
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Real-Time Logistics Telemetry: Quick Ship Readiness & Customer Transit Estimation */}
+          <div className="mt-3 flex flex-wrap items-center gap-1.5 pt-0.5">
+            {/* Quick Ship readiness indicator: calculates if product can be dispatched within 4 hours */}
+            <QuickShipIndicator
+              product={product}
+              isSkuResultCard={isSkuMatched || isExactSku}
+              size="sm"
+            />
+
+            {/* Transit Estimation badge: displays estimated delivery days based on customer's default warehouse selection */}
+            <TransitEstimationBadge
+              product={product}
+              size="sm"
+            />
+          </div>
+
+          {/* SKU Result Card Specialized Telemetry Callout */}
+          {(isExactSku || (isSkuMatched && skuSearchQuery.trim().length > 3)) && (
+            <div
+              id={`sku-result-telemetry-${product.id}`}
+              className="mt-2.5 p-2 rounded-xl bg-sky-950/40 border border-sky-500/40 text-[11px] space-y-1.5 shadow-xs"
+            >
+              <div className="flex items-center justify-between">
+                <span className="font-semibold text-sky-200 flex items-center gap-1">
+                  <Zap className="w-3 h-3 text-sky-400" />
+                  <span>SKU Result Dispatch Status</span>
+                </span>
+                <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded font-bold ${
+                  product.stock > 0
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                    : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                }`}>
+                  {product.stock > 0 ? '<4h Dispatch Qualified' : 'Depleted'}
+                </span>
+              </div>
+              <div className="text-[10px] text-neutral-300 flex items-center justify-between font-mono">
+                <span className="flex items-center gap-1">
+                  <MapPin className="w-2.5 h-2.5 text-neutral-400" />
+                  Hub: {product.warehouse.split('(')[0].trim()}
+                </span>
+                <span className="text-emerald-400 font-semibold">{product.stock} units available</span>
+              </div>
+            </div>
+          )}
+
           {/* Active Price Alert Pill */}
           {existingAlert && (
             <div className="mt-2">
@@ -349,8 +488,8 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
                   </span>
                 )}
               </div>
-              <span className="text-[10px] text-neutral-400 block mt-0.5">
-                Instant Dispatch Ready
+              <span className={`text-[10px] block mt-0.5 ${product.stock > 0 ? 'text-emerald-400 font-medium' : 'text-neutral-500'}`}>
+                {product.stock > 0 ? '⚡ <4h Quick Ship Qualified' : 'Backorder / Restocking'}
               </span>
             </div>
 
@@ -376,14 +515,14 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
             </button>
           </div>
 
-          {/* Action Buttons: Add to Cart + Quick Buy */}
-          <div className="grid grid-cols-2 gap-2">
+          {/* Action Buttons: Add to Cart + Quick Buy + Reserve Item */}
+          <div className="grid grid-cols-3 gap-1.5 sm:gap-2">
             {/* Standard Add to Cart Button */}
             <button
               id={`add-to-cart-${product.id}`}
               onClick={handleAdd}
               disabled={isOutOfStock}
-              className={`py-2 px-2.5 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${
+              className={`py-2 px-2 rounded-xl text-xs font-semibold flex items-center justify-center gap-1 transition-all ${
                 isOutOfStock
                   ? 'bg-neutral-800/60 text-neutral-500 cursor-not-allowed border border-neutral-800'
                   : justAdded
@@ -401,8 +540,8 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
                 </>
               ) : (
                 <>
-                  <ShoppingBag className="w-3.5 h-3.5 text-neutral-400" />
-                  <span>Add to Cart</span>
+                  <ShoppingBag className="w-3.5 h-3.5 text-neutral-400 shrink-0" />
+                  <span className="truncate">Cart</span>
                 </>
               )}
             </button>
@@ -412,32 +551,53 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
               id={`quick-buy-${product.id}`}
               onClick={handleQuickBuy}
               disabled={isOutOfStock}
-              className={`py-2 px-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all shadow-sm ${
+              className={`py-2 px-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1 transition-all shadow-sm ${
                 isOutOfStock
                   ? 'bg-neutral-800/40 text-neutral-600 cursor-not-allowed border border-neutral-800/50'
                   : justQuickBought
                   ? 'bg-emerald-600 text-white scale-[1.02] shadow-emerald-500/25'
                   : 'bg-emerald-500 hover:bg-emerald-400 text-neutral-950 hover:shadow-md hover:shadow-emerald-500/20 active:scale-95'
               }`}
-              title={isOutOfStock ? 'Sold Out' : 'Quick Buy: Immediately add to cart and receive instant confirmation'}
+              title={isOutOfStock ? 'Sold Out' : 'Quick Buy: Immediately add to cart'}
             >
               {isOutOfStock ? (
-                <span>Unavailable</span>
+                <span>N/A</span>
               ) : justQuickBought ? (
                 <>
                   <Check className="w-3.5 h-3.5 stroke-[2.5]" />
-                  <span>Reserved!</span>
+                  <span>Done</span>
                 </>
               ) : (
                 <>
-                  <Zap className="w-3.5 h-3.5 fill-current text-neutral-950" />
-                  <span>Quick Buy</span>
+                  <Zap className="w-3.5 h-3.5 fill-current text-neutral-950 shrink-0" />
+                  <span className="truncate">Quick</span>
                 </>
               )}
+            </button>
+
+            {/* Reserve Item Button (15-min stock lock) */}
+            <button
+              id={`reserve-item-${product.id}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                reserveItem(product.id);
+              }}
+              disabled={isOutOfStock}
+              className={`py-2 px-2 rounded-xl text-xs font-semibold flex items-center justify-center gap-1 transition-all ${
+                isOutOfStock
+                  ? 'bg-neutral-800/40 text-neutral-600 cursor-not-allowed border border-neutral-800/50'
+                  : itemReserved
+                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/50 shadow-sm font-bold'
+                  : 'bg-neutral-800/80 hover:bg-neutral-750 text-neutral-300 hover:text-white border border-neutral-700/70 active:scale-95'
+              }`}
+              title={isOutOfStock ? 'Sold Out' : itemReserved ? 'Active 15-minute stock lock' : 'Create temporary 15-minute stock lock'}
+            >
+              <Lock className={`w-3.5 h-3.5 shrink-0 ${itemReserved ? 'text-amber-400' : 'text-neutral-400'}`} />
+              <span className="truncate">{itemReserved ? 'Locked' : 'Reserve'}</span>
             </button>
           </div>
         </div>
       </div>
-    </div>
+    </motion.div>
   );
 };

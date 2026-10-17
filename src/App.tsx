@@ -31,7 +31,11 @@ import {
   ShieldAlert,
   Unlock,
   FileText,
-  ExternalLink
+  ExternalLink,
+  Network,
+  Tag,
+  Clock,
+  Scale
 } from 'lucide-react';
 import { StoreProvider, useStore } from './context/StoreContext';
 import { LiveTickerBar } from './components/LiveTickerBar';
@@ -55,6 +59,8 @@ import { PredictiveInsightsWidget } from './components/PredictiveInsightsWidget'
 import { UserProfileModal } from './components/UserProfileModal';
 import { ScannerModal, extractSkuFromDecodedText } from './components/ScannerModal';
 import { VoiceDictationButton } from './components/VoiceDictationButton';
+import { REGIONAL_HUBS } from './utils/transitCalculator';
+import { isAuditEntryQuarantineOrDamaged } from './utils/skuAuditSafety';
 
 const StorefrontContent: React.FC = () => {
   const {
@@ -84,7 +90,16 @@ const StorefrontContent: React.FC = () => {
     addAlert,
     isSafeModeEnabled,
     setIsSafeModeEnabled,
-    checkSkuSafety
+    checkSkuSafety,
+    customerDefaultWarehouse,
+    setCustomerDefaultWarehouse,
+    showWarehouseTags,
+    setShowWarehouseTags,
+    getFrequentlySearchedTogether,
+    recentSearchedSkus,
+    comparedProductIds,
+    toggleCompareProduct,
+    setIsCompareModalOpen
   } = useStore();
 
   const [copiedSku, setCopiedSku] = useState<string | null>(null);
@@ -92,6 +107,7 @@ const StorefrontContent: React.FC = () => {
   const [isSkuInputFocused, setIsSkuInputFocused] = useState(false);
   const [isSkuScannerOpen, setIsSkuScannerOpen] = useState(false);
   const [safeModeAuditSku, setSafeModeAuditSku] = useState<string | null>(null);
+  const [groupRelated, setGroupRelated] = useState(false);
 
   // Handle successful barcode or QR code scan for SKU
   const handleSkuScanned = (scannedText: string) => {
@@ -108,16 +124,31 @@ const StorefrontContent: React.FC = () => {
       );
 
       if (matchedProduct) {
-        addAlert(
-          'success',
-          'SKU Scanned & Filtered',
-          `Recognized "${matchedProduct.sku}" (${matchedProduct.name}). Filtered inventory.`
-        );
+        const safety = checkSkuSafety(matchedProduct.sku);
+        const isQuarantined =
+          !safety.isSafe &&
+          (safety.flagType === 'quarantine' ||
+           safety.flagType === 'both' ||
+           safety.flaggedEntries?.some(e => isAuditEntryQuarantineOrDamaged(e).isQuarantine));
+
+        if (isQuarantined) {
+          addAlert(
+            'warning',
+            'Quarantined SKU Intercepted',
+            `Scanned "${matchedProduct.sku}" (${safety.statusLabel}). Audio error buzzer was triggered.`
+          );
+        } else {
+          addAlert(
+            'success',
+            'SKU Scanned & Filtered',
+            `Recognized "${matchedProduct.sku}" (${matchedProduct.name}). Success chime triggered.`
+          );
+        }
       } else {
         addAlert(
           'info',
-          'SKU Scanned',
-          `Populated search field with detected SKU: "${targetSku}".`
+          'Unknown SKU Scanned',
+          `Populated search field with detected SKU: "${targetSku}". Audio error buzzer was triggered.`
         );
       }
     }
@@ -193,22 +224,23 @@ const StorefrontContent: React.FC = () => {
       list = list.filter((p) => p.category === selectedCategory);
     }
 
-    // Dedicated Warehouse SKU Code Search
+    // Dedicated Warehouse SKU Code Search (Supports comma-separated batch filtering)
     if (skuSearchQuery.trim()) {
-      const qSku = skuSearchQuery.trim().toLowerCase();
-      const cleanQSku = qSku.replace(/[-\s_]/g, '');
+      const terms = skuSearchQuery.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
       list = list.filter((p) => {
         const prodSku = p.sku.toLowerCase();
         const cleanProdSku = prodSku.replace(/[-\s_]/g, '');
-        const matchesSku = prodSku.includes(qSku) || cleanProdSku.includes(cleanQSku);
-        if (!matchesSku) return false;
+        const matchesAnyTerm = terms.some(term => {
+          const cleanTerm = term.replace(/[-\s_]/g, '');
+          return prodSku.includes(term) || cleanProdSku.includes(cleanTerm);
+        });
+        if (!matchesAnyTerm) return false;
 
         // When Safe Mode is enabled, cross-reference check against the warehouse audit log:
-        // ensure the SKU being searched for has not been flagged for 'Under Quarantine' or 'Damaged' status before returning results
         if (isSafeModeEnabled) {
           const safety = checkSkuSafety(p.sku);
           if (!safety.isSafe) {
-            return false; // Suppress from returned search results
+            return false;
           }
         }
         return true;
@@ -251,8 +283,20 @@ const StorefrontContent: React.FC = () => {
       list.sort((a, b) => b.rating - a.rating);
     }
 
+    // If groupRelated is enabled and SKU search query is active, cluster related products/variants/accessories
+    if (groupRelated && skuSearchQuery.trim() && list.length > 0) {
+      const primaryIds = new Set(list.map(p => p.id));
+      const primaryCategories = new Set(list.map(p => p.category));
+      
+      const relatedAccessories = products
+        .filter(p => !primaryIds.has(p.id) && primaryCategories.has(p.category) && (!isSafeModeEnabled || checkSkuSafety(p.sku).isSafe))
+        .map(p => ({ ...p, isRelatedCluster: true }));
+
+      list = [...list, ...relatedAccessories];
+    }
+
     return list;
-  }, [products, selectedCategory, searchQuery, skuSearchQuery, isSafeModeEnabled, checkSkuSafety, onlyInStock, onlyLowStock, onlyWishlist, wishlistProductIds, sortBy]);
+  }, [products, selectedCategory, searchQuery, skuSearchQuery, isSafeModeEnabled, checkSkuSafety, onlyInStock, onlyLowStock, onlyWishlist, wishlistProductIds, sortBy, groupRelated]);
 
   const lowStockCount = useMemo(() => {
     return products.filter((p) => p.stock <= p.lowStockThreshold).length;
@@ -265,20 +309,24 @@ const StorefrontContent: React.FC = () => {
   // Cross-reference check for exact entered SKU query against warehouse audit log
   const searchedSkuSafety = useMemo(() => {
     if (!skuSearchQuery.trim()) return null;
-    return checkSkuSafety(skuSearchQuery.trim());
+    const terms = skuSearchQuery.split(',').map(t => t.trim()).filter(Boolean);
+    const lastTerm = terms[terms.length - 1] || skuSearchQuery.trim();
+    return checkSkuSafety(lastTerm);
   }, [skuSearchQuery, checkSkuSafety]);
 
   // Products matching SKU search that have been withheld/suppressed by Safe Mode
   const safeModeSuppressedProducts = useMemo(() => {
     if (!isSafeModeEnabled || !skuSearchQuery.trim()) return [];
-    const qSku = skuSearchQuery.trim().toLowerCase();
-    const cleanQSku = qSku.replace(/[-\s_]/g, '');
+    const terms = skuSearchQuery.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
 
     return products
       .filter((p) => {
         const prodSku = p.sku.toLowerCase();
         const cleanProdSku = prodSku.replace(/[-\s_]/g, '');
-        return prodSku.includes(qSku) || cleanProdSku.includes(cleanQSku);
+        return terms.some(term => {
+          const cleanTerm = term.replace(/[-\s_]/g, '');
+          return prodSku.includes(term) || cleanProdSku.includes(cleanTerm);
+        });
       })
       .map((p) => {
         const safety = checkSkuSafety(p.sku);
@@ -292,15 +340,22 @@ const StorefrontContent: React.FC = () => {
 
   const exactSkuProduct = useMemo(() => {
     if (!skuSearchQuery.trim()) return null;
-    const target = skuSearchQuery.trim().toLowerCase();
-    return products.find((p) => p.sku.toLowerCase() === target) || null;
+    const terms = skuSearchQuery.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
+    return products.find((p) => terms.some(term => p.sku.toLowerCase() === term)) || null;
   }, [products, skuSearchQuery]);
+
+  const frequentlySearchedTogether = useMemo(() => {
+    if (!exactSkuProduct) return [];
+    return getFrequentlySearchedTogether(exactSkuProduct.sku);
+  }, [exactSkuProduct, getFrequentlySearchedTogether]);
 
   const skuSuggestions = useMemo(() => {
     if (!skuSearchQuery.trim()) return [];
-    const target = skuSearchQuery.trim().toLowerCase();
+    const parts = skuSearchQuery.split(',');
+    const currentTerm = parts[parts.length - 1].trim().toLowerCase();
+    if (!currentTerm) return [];
     return availableSkus
-      .filter((sku) => sku.toLowerCase().includes(target))
+      .filter((sku) => sku.toLowerCase().includes(currentTerm))
       .slice(0, 8); // Limit to 8 suggestions
   }, [availableSkus, skuSearchQuery]);
 
@@ -580,9 +635,28 @@ const StorefrontContent: React.FC = () => {
                 </span>
               )}
             </div>
-            <p className="text-xs text-neutral-400 mt-0.5">
-              Available across East Coast, West Coast, and Midwest hubs
-            </p>
+            <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-400 mt-1">
+              <span>Transit Anchor:</span>
+              <div className="relative inline-flex items-center">
+                <select
+                  id="catalog-default-warehouse-select"
+                  value={customerDefaultWarehouse}
+                  onChange={(e) => {
+                    setCustomerDefaultWarehouse(e.target.value);
+                    addAlert('info', 'Default Warehouse Selected', `Updated default warehouse to "${e.target.value.split('(')[0].trim()}". Transit badges recalculated.`);
+                  }}
+                  className="bg-neutral-900 hover:bg-neutral-850 border border-neutral-700 rounded-lg px-2 py-0.5 text-[11px] font-medium text-emerald-300 focus:outline-hidden focus:border-emerald-500 cursor-pointer"
+                  title="Customer's Default Warehouse for calculating transit estimation across product cards"
+                  aria-label="Customer Default Warehouse"
+                >
+                  {REGIONAL_HUBS.map(hub => (
+                    <option key={hub.id} value={hub.name}>
+                      {hub.name.split('(')[0].trim()} ({hub.region})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5 sm:gap-3">
@@ -849,52 +923,141 @@ const StorefrontContent: React.FC = () => {
                   </div>
                 </div>
               )}
+
+              {/* Quick Switch Menu (Last 5 Searched SKUs) when SKU input is focused and empty */}
+              {isSkuInputFocused && !skuSearchQuery.trim() && recentSearchedSkus.length > 0 && (
+                <div className="absolute top-full left-0 w-full mt-1.5 bg-neutral-900 border border-neutral-700/80 rounded-xl shadow-xl z-50 overflow-hidden p-2.5">
+                  <div className="text-[10px] font-semibold text-neutral-400 uppercase tracking-wider mb-2 flex items-center justify-between px-1">
+                    <div className="flex items-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5 text-sky-400" />
+                      <span>Quick Switch (Recent SKUs)</span>
+                    </div>
+                    <span className="text-[9px] text-neutral-500 font-mono">Instant Navigation</span>
+                  </div>
+                  <div className="space-y-1">
+                    {recentSearchedSkus.map(sku => {
+                      const prod = products.find(p => p.sku.toUpperCase() === sku.toUpperCase());
+                      return (
+                        <button
+                          key={sku}
+                          onClick={() => {
+                            setSkuSearchQuery(sku);
+                            trackSkuSearch(sku);
+                            setIsSkuInputFocused(false);
+                          }}
+                          className="w-full text-left px-2.5 py-2 rounded-lg bg-neutral-800/50 hover:bg-neutral-800 border border-neutral-700/40 hover:border-sky-500/50 transition-all flex items-center justify-between group"
+                        >
+                          <div className="flex items-center gap-2 min-w-0 pr-2">
+                            <span className="text-xs font-mono font-bold text-sky-400 group-hover:text-sky-300">
+                              {sku}
+                            </span>
+                            {prod && (
+                              <span className="text-[10px] text-neutral-400 truncate">
+                                {prod.name}
+                              </span>
+                            )}
+                          </div>
+                          <span className="text-[10px] font-mono text-neutral-500 group-hover:text-white bg-neutral-900 px-1.5 py-0.5 rounded">
+                            Switch
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
               
               {/* SKU Predictive Autocomplete Dropdown (when not in full error) */}
               {isSkuInputFocused && (!exactSkuProduct) && !skuValidationStatus.isError && (skuSuggestions.length > 0 || trendingSkuSearches.length > 0) && (
                 <div className="absolute top-full left-0 w-full mt-1.5 bg-neutral-900 border border-neutral-700/80 rounded-xl shadow-xl z-50 overflow-hidden min-w-max">
                   {skuSearchQuery.trim() && skuSuggestions.length > 0 ? (
-                    <div className="divide-y divide-neutral-800/50">
-                      {skuSuggestions.map((sku, index) => {
-                        const prod = products.find(p => p.sku === sku);
-                        if (!prod) return null;
-                        const safety = isSafeModeEnabled ? checkSkuSafety(sku) : null;
-                        const isFlagged = safety && !safety.isSafe;
+                    <div>
+                      <div className="divide-y divide-neutral-800/50 max-h-60 overflow-y-auto">
+                        {skuSuggestions.map((sku, index) => {
+                          const prod = products.find(p => p.sku === sku);
+                          if (!prod) return null;
+                          const safety = isSafeModeEnabled ? checkSkuSafety(sku) : null;
+                          const isFlagged = safety && !safety.isSafe;
+                          const isCompared = comparedProductIds.includes(prod.id);
 
-                        return (
+                          return (
+                            <div
+                              key={sku}
+                              className={`w-full px-3 py-2.5 hover:bg-neutral-800/80 transition-colors flex items-center justify-between group ${
+                                isFlagged ? 'bg-amber-950/20' : ''
+                              }`}
+                            >
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSkuSearchQuery(sku);
+                                  trackSkuSearch(sku);
+                                  setIsSkuInputFocused(false);
+                                }}
+                                className="flex-1 text-left flex items-center justify-between pr-3 min-w-0 cursor-pointer"
+                              >
+                                <div className="flex flex-col min-w-0 pr-2">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className={`text-xs font-mono font-medium ${isFlagged ? 'text-amber-300' : 'text-sky-400 group-hover:text-sky-300'}`}>
+                                      {sku}
+                                    </span>
+                                    {isFlagged && (
+                                      <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1 font-bold">
+                                        <ShieldAlert className="w-2.5 h-2.5 text-amber-400" />
+                                        <span>{safety.statusLabel}</span>
+                                      </span>
+                                    )}
+                                  </div>
+                                  <span className="text-[10px] text-neutral-400 truncate">
+                                    {prod.name}
+                                  </span>
+                                </div>
+                                {prod.stock <= prod.lowStockThreshold && (
+                                  <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0 ml-2" />
+                                )}
+                              </button>
+
+                              {/* Compare with Selection Checkbox / Toggle */}
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  toggleCompareProduct(prod.id);
+                                }}
+                                className={`px-2 py-1 rounded-lg text-[10px] font-mono font-bold border transition-all flex items-center gap-1 shrink-0 cursor-pointer ${
+                                  isCompared
+                                    ? 'bg-emerald-500/25 text-emerald-300 border-emerald-500/50 shadow-xs'
+                                    : 'bg-neutral-800/80 hover:bg-neutral-750 text-neutral-400 hover:text-white border-neutral-700/60'
+                                }`}
+                                title={isCompared ? 'Remove from comparison' : 'Compare with selection'}
+                              >
+                                <Scale className="w-3 h-3" />
+                                <span className="hidden sm:inline">{isCompared ? 'Compared' : 'Compare'}</span>
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Dropdown Comparison Footer when items are selected */}
+                      {comparedProductIds.length > 0 && (
+                        <div className="p-2.5 bg-neutral-950 border-t border-neutral-800 flex items-center justify-between gap-2">
+                          <span className="text-[11px] font-mono text-emerald-400 flex items-center gap-1.5 font-medium">
+                            <Scale className="w-3.5 h-3.5" />
+                            {comparedProductIds.length} item{comparedProductIds.length > 1 ? 's' : ''} selected for comparison
+                          </span>
                           <button
-                            key={sku}
+                            type="button"
                             onClick={() => {
-                              setSkuSearchQuery(sku);
-                              trackSkuSearch(sku);
+                              setIsCompareModalOpen(true);
                               setIsSkuInputFocused(false);
                             }}
-                            className={`w-full text-left px-3 py-2.5 hover:bg-neutral-800 focus:bg-neutral-800 transition-colors flex items-center justify-between group ${
-                              isFlagged ? 'bg-amber-950/20' : ''
-                            }`}
+                            className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-neutral-950 font-bold text-xs shadow-md transition-all cursor-pointer"
                           >
-                            <div className="flex flex-col min-w-0 pr-3">
-                              <div className="flex items-center gap-1.5">
-                                <span className={`text-xs font-mono font-medium ${isFlagged ? 'text-amber-300' : 'text-sky-400 group-hover:text-sky-300'}`}>
-                                  {sku}
-                                </span>
-                                {isFlagged && (
-                                  <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1 font-bold">
-                                    <ShieldAlert className="w-2.5 h-2.5 text-amber-400" />
-                                    <span>{safety.statusLabel}</span>
-                                  </span>
-                                )}
-                              </div>
-                              <span className="text-[10px] text-neutral-400 truncate">
-                                {prod.name}
-                              </span>
-                            </div>
-                            {prod.stock <= prod.lowStockThreshold && (
-                              <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-                            )}
+                            Launch Comparison Matrix
                           </button>
-                        );
-                      })}
+                        </div>
+                      )}
                     </div>
                   ) : null}
                   {trendingSkuSearches.length > 0 && !skuSearchQuery.trim() && (
@@ -918,6 +1081,47 @@ const StorefrontContent: React.FC = () => {
                       </div>
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* Frequently Searched Together Dropdown when Primary SKU is Selected */}
+              {isSkuInputFocused && exactSkuProduct && frequentlySearchedTogether.length > 0 && (
+                <div className="absolute top-full left-0 w-full mt-1.5 bg-neutral-900 border border-neutral-700/80 rounded-xl shadow-xl z-50 overflow-hidden p-2.5">
+                  <div className="text-[10px] font-semibold text-neutral-400 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+                    <span>Frequently Searched Together with {exactSkuProduct.sku}</span>
+                  </div>
+                  <div className="space-y-1.5">
+                    {frequentlySearchedTogether.map(secProd => (
+                      <button
+                        key={secProd.id}
+                        onClick={() => {
+                          const current = skuSearchQuery.trim();
+                          const newQuery = current && !current.toUpperCase().includes(secProd.sku.toUpperCase())
+                            ? `${current}, ${secProd.sku}`
+                            : secProd.sku;
+                          setSkuSearchQuery(newQuery);
+                          trackSkuSearch(secProd.sku);
+                          setIsSkuInputFocused(false);
+                        }}
+                        className="w-full text-left px-2.5 py-2 rounded-lg bg-neutral-800/60 hover:bg-neutral-800 border border-neutral-700/50 hover:border-sky-500/50 transition-all flex items-center justify-between group"
+                      >
+                        <div className="flex flex-col min-w-0 pr-2">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-xs font-mono font-bold text-sky-400 group-hover:text-sky-300">
+                              {secProd.sku}
+                            </span>
+                            <span className="text-[10px] text-neutral-400 truncate">
+                              {secProd.name}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="text-[10px] font-mono text-neutral-400 bg-neutral-900 px-2 py-0.5 rounded border border-neutral-700">
+                          Add to Batch
+                        </div>
+                      </button>
+                    ))}
+                  </div>
                 </div>
               )}
 
@@ -1095,6 +1299,38 @@ const StorefrontContent: React.FC = () => {
                 <option value="rating" className="bg-neutral-900 text-white">Highest Rated</option>
               </select>
             </div>
+
+            {/* Group Related Toggle */}
+            <button
+              id="group-related-toggle-btn"
+              type="button"
+              onClick={() => setGroupRelated(!groupRelated)}
+              className={`flex items-center gap-1.5 text-xs px-3 py-2 rounded-xl transition-all border cursor-pointer ${
+                groupRelated
+                  ? 'bg-purple-500/20 text-purple-300 border-purple-500/50 shadow-sm shadow-purple-500/20 font-semibold'
+                  : 'bg-neutral-900 text-neutral-400 border-neutral-800 hover:text-neutral-200 hover:border-neutral-700'
+              }`}
+              title="Cluster variants and accessories together when searching parent SKUs"
+            >
+              <Network className={`w-3.5 h-3.5 ${groupRelated ? 'text-purple-400' : 'text-neutral-400'}`} />
+              <span>Group Related</span>
+            </button>
+
+            {/* Show Tags Toggle */}
+            <button
+              id="show-tags-toggle-btn"
+              type="button"
+              onClick={() => setShowWarehouseTags(!showWarehouseTags)}
+              className={`flex items-center gap-1.5 text-xs px-3 py-2 rounded-xl transition-all border cursor-pointer ${
+                showWarehouseTags
+                  ? 'bg-sky-500/20 text-sky-300 border-sky-500/50 shadow-sm shadow-sky-500/20 font-semibold'
+                  : 'bg-neutral-900 text-neutral-500 border-neutral-800 hover:text-neutral-300 hover:border-neutral-700'
+              }`}
+              title="Toggle warehouse tag badge visibility across catalog product cards"
+            >
+              <Tag className={`w-3.5 h-3.5 ${showWarehouseTags ? 'text-sky-400' : 'text-neutral-500'}`} />
+              <span>Show Tags</span>
+            </button>
 
             {/* Bulk Inventory Update */}
             <button

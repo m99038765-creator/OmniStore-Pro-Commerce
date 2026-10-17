@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   BellRing,
@@ -28,7 +28,8 @@ export const InventoryAlertModal: React.FC = () => {
     removeInventoryAlert,
     simulatePriceDrop,
     setQuickViewProduct,
-    products
+    products,
+    addAlert
   } = useStore();
 
   const [targetInput, setTargetInput] = useState<string>('');
@@ -36,6 +37,52 @@ export const InventoryAlertModal: React.FC = () => {
   const [notifyOnRestock, setNotifyOnRestock] = useState<boolean>(false);
   const [notifyOnLowStock, setNotifyOnLowStock] = useState<boolean>(false);
   const [isSimulating, setIsSimulating] = useState(false);
+
+  // Warehouse Summary Shift Digest state
+  const [shiftSelection, setShiftSelection] = useState<string>('Morning Shift (06:00)');
+  const [digestEmailInput, setDigestEmailInput] = useState<string>('supervisor@omnistore.internal');
+  const [scheduledDigests, setScheduledDigests] = useState<{ id: string; shift: string; email: string; timestamp: string }[]>(() => {
+    try {
+      const saved = localStorage.getItem('omnistore_scheduled_warehouse_digests');
+      return saved ? JSON.parse(saved) : [
+        { id: 'dg-1', shift: 'Morning Shift (06:00)', email: 'shift-lead-a@omnistore.internal', timestamp: new Date().toISOString() }
+      ];
+    } catch {
+      return [];
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('omnistore_scheduled_warehouse_digests', JSON.stringify(scheduledDigests));
+    } catch {}
+  }, [scheduledDigests]);
+
+  const lowStockItems = useMemo(() => {
+    return products.filter(p => p.stock <= p.lowStockThreshold);
+  }, [products]);
+
+  const handleScheduleDigest = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!digestEmailInput.trim()) return;
+    const newEntry = {
+      id: `dg-${Date.now()}`,
+      shift: shiftSelection,
+      email: digestEmailInput.trim(),
+      timestamp: new Date().toISOString()
+    };
+    setScheduledDigests(prev => [newEntry, ...prev]);
+    addAlert('success', 'Warehouse Summary Scheduled', `Low-stock shift digest scheduled for ${shiftSelection} to ${digestEmailInput}! (${lowStockItems.length} items currently below threshold).`);
+  };
+
+  const handleSendDigestNow = () => {
+    addAlert('success', 'Warehouse Summary Dispatched', `Shift summary email successfully dispatched! Included ${lowStockItems.length} low-stock inventory items.`);
+  };
+
+  const handleRemoveDigest = (id: string) => {
+    setScheduledDigests(prev => prev.filter(d => d.id !== id));
+    addAlert('info', 'Digest Cancelled', 'Scheduled warehouse summary digest removed.');
+  };
 
   const currentProduct: Product | null = activeInventoryAlertProduct;
 
@@ -264,6 +311,106 @@ export const InventoryAlertModal: React.FC = () => {
                 </form>
               </div>
             )}
+
+            {/* Automated Warehouse Summary & Low-Stock Shift Digest Section */}
+            <div className="p-4 sm:p-5 rounded-2xl bg-neutral-950/80 border border-neutral-800 space-y-4">
+              <div className="flex items-center justify-between flex-wrap gap-2 pb-3 border-b border-neutral-800">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-lg bg-sky-500/15 border border-sky-500/30 flex items-center justify-center text-sky-400">
+                    <Mail className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-2">
+                      <span>Warehouse Summary Shift Digest</span>
+                      <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-sky-500/20 text-sky-300 border border-sky-500/30">
+                        {lowStockItems.length} Low-Stock Items
+                      </span>
+                    </h3>
+                    <p className="text-[11px] text-neutral-400">
+                      Schedule automated shift email summaries for items below low-stock thresholds
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  id="send-digest-now-btn"
+                  onClick={handleSendDigestNow}
+                  className="px-3 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs shadow-md shadow-sky-950/50 transition-all flex items-center gap-1.5 cursor-pointer"
+                  title="Immediately dispatch low-stock summary email for current shift"
+                >
+                  <Zap className="w-3.5 h-3.5" />
+                  <span>Send Digest Now</span>
+                </button>
+              </div>
+
+              <form onSubmit={handleScheduleDigest} className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="text-[11px] font-medium text-neutral-300 block mb-1">Target Shift</label>
+                  <select
+                    value={shiftSelection}
+                    onChange={(e) => setShiftSelection(e.target.value)}
+                    className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2 text-xs text-neutral-200 focus:outline-none focus:border-sky-500"
+                  >
+                    <option value="Morning Shift (06:00)">Morning Shift (06:00)</option>
+                    <option value="Afternoon Shift (14:00)">Afternoon Shift (14:00)</option>
+                    <option value="Night Shift (22:00)">Night Shift (22:00)</option>
+                    <option value="All Shifts (Continuous)">All Shifts (Continuous)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-medium text-neutral-300 block mb-1">Recipient Email / Channel</label>
+                  <input
+                    type="email"
+                    value={digestEmailInput}
+                    onChange={(e) => setDigestEmailInput(e.target.value)}
+                    placeholder="supervisor@omnistore.internal"
+                    required
+                    className="w-full bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2 text-xs text-neutral-200 focus:outline-none focus:border-sky-500"
+                  />
+                </div>
+
+                <div className="flex items-end">
+                  <button
+                    type="submit"
+                    className="w-full py-2 px-4 rounded-xl bg-neutral-800 hover:bg-neutral-750 text-white font-bold text-xs border border-neutral-700 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <Clock className="w-3.5 h-3.5 text-sky-400" />
+                    <span>Schedule Shift Digest</span>
+                  </button>
+                </div>
+              </form>
+
+              {scheduledDigests.length > 0 && (
+                <div className="pt-2 border-t border-neutral-850 space-y-2">
+                  <span className="text-[10px] font-semibold text-neutral-400 uppercase tracking-wider block">
+                    Active Scheduled Shift Digests ({scheduledDigests.length})
+                  </span>
+                  <div className="space-y-1.5 max-h-36 overflow-y-auto">
+                    {scheduledDigests.map(dg => (
+                      <div
+                        key={dg.id}
+                        className="flex items-center justify-between p-2 rounded-lg bg-neutral-900 border border-neutral-800 text-xs"
+                      >
+                        <div className="flex items-center gap-2 min-w-0 pr-2">
+                          <span className="font-mono text-sky-400 font-bold shrink-0">{dg.shift}</span>
+                          <span className="text-neutral-300 truncate">{dg.email}</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveDigest(dg.id)}
+                          className="text-neutral-500 hover:text-rose-400 p-1"
+                          title="Cancel scheduled digest"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
 
             {/* List of Active & Triggered Price Alerts */}
             <div>

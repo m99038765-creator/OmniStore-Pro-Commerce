@@ -18,7 +18,8 @@ import {
   ArrowRight,
   ShieldCheck,
   Download,
-  AlertCircle
+  AlertCircle,
+  FileJson
 } from 'lucide-react';
 import { Product, SkuAuditLogEntry } from '../types';
 import { getAuditLogsForSku } from '../data/initialAuditLogs';
@@ -117,6 +118,28 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
     navigator.clipboard.writeText(headers + rows);
     setCopiedCsv(true);
     setTimeout(() => setCopiedCsv(false), 2500);
+  };
+
+  // Download JSON audit history for compliance reporting
+  const handleDownloadJson = () => {
+    if (logs.length === 0) return;
+    const payload = {
+      sku: activeSku,
+      productName,
+      warehouse,
+      generatedAt: new Date().toISOString(),
+      totalEntries: logs.length,
+      auditLedgerEntries: logs
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `sku-audit-history-${activeSku.toLowerCase().replace(/[^a-z0-9]/g, '-')}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   // Filter logs
@@ -343,6 +366,17 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
                   <span className="text-[10px] hidden sm:inline">CSV</span>
                 </>
               )}
+            </button>
+
+            <button
+              type="button"
+              id="download-audit-json-btn"
+              onClick={handleDownloadJson}
+              className="px-2.5 py-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 transition-colors text-xs flex items-center gap-1.5 cursor-pointer font-medium"
+              title="Download full audit history ledger as a JSON file for compliance reporting"
+            >
+              <FileJson className="w-3.5 h-3.5 text-amber-400" />
+              <span className="text-[10px]">Download Audit History (JSON)</span>
             </button>
           </div>
         </div>

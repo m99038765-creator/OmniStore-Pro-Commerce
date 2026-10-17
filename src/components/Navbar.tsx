@@ -12,7 +12,8 @@ import {
   BellRing,
   History,
   User,
-  ChevronDown
+  ChevronDown,
+  Truck
 } from 'lucide-react';
 import { useStore } from '../context/StoreContext';
 import { VoiceDictationButton } from './VoiceDictationButton';
@@ -38,7 +39,8 @@ export const Navbar: React.FC = () => {
     inventoryAlerts,
     setIsInventoryAlertModalOpen,
     userProfile,
-    setIsUserProfileOpen
+    setIsUserProfileOpen,
+    customerDefaultWarehouse
   } = useStore();
 
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
@@ -339,6 +341,30 @@ export const Navbar: React.FC = () => {
                         {userProfile.savedAddresses.length}
                       </span>
                     </button>
+
+                    {/* Default Regional Warehouse Anchor */}
+                    <div
+                      id="user-menu-default-warehouse"
+                      onClick={() => {
+                        setIsUserMenuOpen(false);
+                        setIsUserProfileOpen(true);
+                      }}
+                      className="p-2.5 rounded-xl bg-neutral-900/60 border border-neutral-800 text-left hover:bg-neutral-850 transition-colors cursor-pointer"
+                    >
+                      <div className="flex items-center justify-between text-[10px] text-neutral-400 font-mono mb-0.5">
+                        <span className="flex items-center gap-1">
+                          <Truck className="w-3 h-3 text-emerald-400" />
+                          Default Warehouse
+                        </span>
+                        <span className="text-emerald-400 font-bold">Transit Anchor</span>
+                      </div>
+                      <div className="text-xs font-semibold text-white truncate">
+                        {customerDefaultWarehouse}
+                      </div>
+                      <div className="text-[10px] text-neutral-500">
+                        Click to change fulfillment hub
+                      </div>
+                    </div>
 
                     <div className="border-t border-neutral-800/80 my-1" />
 

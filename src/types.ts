@@ -35,6 +35,8 @@ export interface Product {
   isWishlisted?: boolean;
   wishlist?: boolean;
   warranty: string;
+  warehouseTags?: string[];
+  isRelatedCluster?: boolean;
 }
 
 export interface SavedAddress {
@@ -91,6 +93,7 @@ export interface UserProfile {
   avatarColor: string;
   timezone: string;
   currency: 'USD' | 'EUR' | 'GBP' | 'CAD';
+  defaultWarehouse?: string; // Customer's default fulfillment regional warehouse selection
   memberSince: string;
   membershipTier: 'OmniStore Pro' | 'Enterprise VIP' | 'Standard Creator';
   twoFactorEnabled: boolean;
@@ -335,6 +338,42 @@ export interface CategoryDepletionReport {
   categoriesAtRiskCount: number;
   categories: CategoryDepletionInsight[];
   executiveAiSynthesis?: string;
+}
+
+export interface TransitEstimation {
+  daysMin: number;
+  daysMax: number;
+  daysLabel: string; // e.g. "1-2 Business Days", "2-3 Business Days", "3-4 Business Days", "5-7+ Days (Backorder)"
+  shortDaysLabel: string; // e.g. "1-2 Days", "2-3 Days", "3-4 Days"
+  estimatedDeliveryDate: string; // e.g. "Oct 18 - Oct 19"
+  fullDeliveryDateText: string; // e.g. "Est. Delivery: Thursday, Oct 18"
+  transitTier: 'same_hub' | 'regional_express' | 'national_transit' | 'out_of_stock';
+  distanceMiles: number;
+  productWarehouse: string;
+  customerWarehouse: string;
+  isSameWarehouse: boolean;
+  badgeColorClass: {
+    bg: string;
+    border: string;
+    text: string;
+    icon: string;
+  };
+}
+
+export interface QuickShipReadiness {
+  isEligible: boolean;
+  canDispatchWithin4Hours: boolean;
+  status: 'ready' | 'low_stock_ready' | 'standard_dispatch' | 'quarantined' | 'out_of_stock';
+  badgeLabel: string; // e.g. "Quick Ship: <4h Dispatch"
+  shortBadgeLabel: string; // e.g. "<4h Dispatch"
+  dispatchWindow: string; // "< 4 Hours"
+  closestHubName: string;
+  closestHubCity: string;
+  distanceToHub: number | null;
+  availableUnits: number;
+  cutoffCountdownText: string; // e.g. "Order within 2h 45m for next 4h wave"
+  reason: string;
+  confidenceScore: number;
 }
 
 

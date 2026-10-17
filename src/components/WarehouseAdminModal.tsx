@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   X,
@@ -59,7 +59,8 @@ export const WarehouseAdminModal: React.FC = () => {
     skuAdjustProduct,
     setSkuAdjustProduct,
     offlineInventoryQueue,
-    syncOfflineInventory
+    syncOfflineInventory,
+    isReserved
   } = useStore();
 
   const [scannerProductId, setScannerProductId] = useState<string | null>(null);
@@ -99,6 +100,10 @@ export const WarehouseAdminModal: React.FC = () => {
       'p-7': 18
     };
   });
+
+  const reservedConflicts = useMemo(() => {
+    return products.filter(p => adminSelectedProductIds.includes(p.id) && (p.reserved > 0 || isReserved(p.id)));
+  }, [products, adminSelectedProductIds, isReserved]);
 
   const recordSkuAccess = (productId: string) => {
     setAccessCounts(prev => {
@@ -182,6 +187,43 @@ export const WarehouseAdminModal: React.FC = () => {
     });
   }, [products, skuFilterCategory, skuFilterWarehouse, skuFilterSearch]);
 
+  useEffect(() => {
+    if (!isAdminOpen) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      const isInput = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
+
+      if (e.key === 'Escape') {
+        setIsAdminOpen(false);
+        return;
+      }
+
+      if (isInput) return;
+
+      if (e.key === '/') {
+        e.preventDefault();
+        const searchInput = document.getElementById('admin-inventory-search-input') as HTMLInputElement;
+        if (searchInput) {
+          searchInput.focus();
+          searchInput.select();
+        }
+      } else if (e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        setAdminActiveTab('scanner');
+      } else if (e.key.toLowerCase() === 'b') {
+        e.preventDefault();
+        setAdminActiveTab('batch');
+      } else if (e.key.toLowerCase() === 'i') {
+        e.preventDefault();
+        setAdminActiveTab('inventory');
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isAdminOpen, setIsAdminOpen, setAdminActiveTab]);
+
   if (!isAdminOpen) return null;
 
   const handleSimulate = async (productId?: string) => {
@@ -247,6 +289,32 @@ export const WarehouseAdminModal: React.FC = () => {
             >
               <X className="w-5 h-5" />
             </button>
+          </div>
+
+          {/* Power User Keyboard Shortcuts Helper Bar */}
+          <div className="px-5 py-2 bg-neutral-900/40 border-b border-neutral-800/80 flex flex-wrap items-center justify-between text-[11px] font-mono text-neutral-400">
+            <span className="flex items-center gap-1.5 font-semibold text-neutral-300">
+              <span className="w-2 h-2 rounded-full bg-sky-400 animate-pulse" />
+              <span>Power User Shortcuts:</span>
+            </span>
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="flex items-center gap-1">
+                <kbd className="px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-200 border border-neutral-700 font-mono text-[10px]">[/]</kbd>
+                <span>Search SKU</span>
+              </span>
+              <span className="flex items-center gap-1">
+                <kbd className="px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-200 border border-neutral-700 font-mono text-[10px]">[S]</kbd>
+                <span>Scanner</span>
+              </span>
+              <span className="flex items-center gap-1">
+                <kbd className="px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-200 border border-neutral-700 font-mono text-[10px]">[B]</kbd>
+                <span>Batch Update</span>
+              </span>
+              <span className="flex items-center gap-1">
+                <kbd className="px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-200 border border-neutral-700 font-mono text-[10px]">[Esc]</kbd>
+                <span>Close</span>
+              </span>
+            </div>
           </div>
 
           {/* Action Success Alert */}
@@ -481,6 +549,31 @@ export const WarehouseAdminModal: React.FC = () => {
 
               {/* Product Stock Table */}
               <div className="flex-1 overflow-y-auto p-4 sm:p-5">
+                {/* Visual Conflict Detection Helper for Active Reservations */}
+                {reservedConflicts.length > 0 && (
+                  <div
+                    id="admin-reservation-conflict-banner"
+                    className="mb-4 p-3.5 rounded-xl bg-amber-950/60 border border-amber-500/80 flex flex-wrap items-center justify-between gap-3 text-xs shadow-lg shadow-amber-950/30 animate-in fade-in"
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-8 h-8 rounded-lg bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400 shrink-0">
+                        <AlertTriangle className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <p className="text-amber-200 font-bold">Active Reservation Conflict Detected</p>
+                        <p className="text-amber-300/80 text-[11px]">
+                          {reservedConflicts.length} selected SKU{reservedConflicts.length > 1 ? 's' : ''} ({reservedConflicts.map(p => p.sku).join(', ')}) currently have active stock reservations by staff members. Batch updating may conflict with pending orders.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-[10px] px-2 py-1 rounded bg-amber-900/60 text-amber-200 border border-amber-500/40 font-bold">
+                        Conflict Warning
+                      </span>
+                    </div>
+                  </div>
+                )}
+
                 {/* Batch selection quick action banner */}
                 {adminSelectedProductIds.length > 0 && (
                   <div
@@ -659,6 +752,23 @@ export const WarehouseAdminModal: React.FC = () => {
                         Bulk QR Codes ({filteredInventoryProducts.length} SKUs)
                       </span>
                     </button>
+
+                    {/* Print All Visible Labels Button */}
+                    <button
+                      id="admin-print-visible-labels-btn"
+                      onClick={() => {
+                        const visibleIds = filteredInventoryProducts.map(p => p.id);
+                        setAdminSelectedProductIds(visibleIds);
+                        setIsBulkQrOpen(true);
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-bold text-xs flex items-center gap-1.5 shadow-md shadow-emerald-500/20 transition-all active:scale-95 cursor-pointer"
+                      title="Trigger batch label PDF generation and print layout for all currently visible products in search results"
+                    >
+                      <Printer className="w-3.5 h-3.5" />
+                      <span>
+                        Print All Visible Labels ({filteredInventoryProducts.length})
+                      </span>
+                    </button>
                   </div>
                 </div>
 
@@ -762,6 +872,15 @@ export const WarehouseAdminModal: React.FC = () => {
                               <span className="text-[10px] font-mono text-neutral-500 bg-neutral-950 px-1.5 py-0.5 rounded border border-neutral-800">
                                 {product.sku}
                               </span>
+                              {product.reserved > 0 && (
+                                <span
+                                  className="inline-flex items-center gap-1 text-[10px] font-semibold text-amber-300 bg-amber-950/80 px-1.5 py-0.5 rounded border border-amber-500/50"
+                                  title={`Active reservation hold: ${product.reserved} units locked`}
+                                >
+                                  <Lock className="w-2.5 h-2.5 text-amber-400" />
+                                  <span>{product.reserved} Reserved</span>
+                                </span>
+                              )}
                             </div>
                             <div className="flex items-center gap-3 text-[11px] text-neutral-400 mt-0.5">
                               <span className="font-mono text-emerald-400 font-medium">

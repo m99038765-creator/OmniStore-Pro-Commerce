@@ -12,6 +12,7 @@ export const INITIAL_USER_PROFILE: UserProfile = {
   avatarColor: 'emerald',
   timezone: 'America/Los_Angeles (PST/PDT)',
   currency: 'USD',
+  defaultWarehouse: 'Bay Area Hub (WH-01)',
   memberSince: 'March 2024',
   membershipTier: 'OmniStore Pro',
   twoFactorEnabled: true,

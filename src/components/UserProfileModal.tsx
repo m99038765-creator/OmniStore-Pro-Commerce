@@ -30,10 +30,12 @@ import {
   Layers,
   ChevronRight,
   RefreshCw,
-  Send
+  Send,
+  Truck
 } from 'lucide-react';
 import { useStore } from '../context/StoreContext';
 import { SavedAddress, CommunicationPreferences, UserProfile } from '../types';
+import { REGIONAL_HUBS } from '../utils/transitCalculator';
 
 export const UserProfileModal: React.FC = () => {
   const {
@@ -53,7 +55,9 @@ export const UserProfileModal: React.FC = () => {
     setIsOrderHistoryOpen,
     setIsInventoryAlertModalOpen,
     setOnlyWishlist,
-    addAlert
+    addAlert,
+    customerDefaultWarehouse,
+    setCustomerDefaultWarehouse
   } = useStore();
 
   const [activeTab, setActiveTab] = useState<'details' | 'addresses' | 'communications' | 'security'>('details');
@@ -69,6 +73,7 @@ export const UserProfileModal: React.FC = () => {
   const [timezone, setTimezone] = useState(userProfile.timezone);
   const [currency, setCurrency] = useState(userProfile.currency);
   const [avatarColor, setAvatarColor] = useState(userProfile.avatarColor || 'emerald');
+  const [defaultWarehouse, setDefaultWarehouse] = useState(customerDefaultWarehouse || userProfile.defaultWarehouse || 'Bay Area Hub (WH-01)');
   const [isSavingDetails, setIsSavingDetails] = useState(false);
 
   // Sync state whenever userProfile changes
@@ -84,8 +89,9 @@ export const UserProfileModal: React.FC = () => {
       setTimezone(userProfile.timezone);
       setCurrency(userProfile.currency);
       setAvatarColor(userProfile.avatarColor || 'emerald');
+      setDefaultWarehouse(customerDefaultWarehouse || userProfile.defaultWarehouse || 'Bay Area Hub (WH-01)');
     }
-  }, [userProfile, isUserProfileOpen]);
+  }, [userProfile, customerDefaultWarehouse, isUserProfileOpen]);
 
   // Address modal/form state
   const [isAddressModalOpen, setIsAddressModalOpen] = useState(false);
@@ -149,9 +155,12 @@ export const UserProfileModal: React.FC = () => {
         role: role.trim(),
         timezone,
         currency,
-        avatarColor
+        avatarColor,
+        defaultWarehouse
       });
+      setCustomerDefaultWarehouse(defaultWarehouse);
       setIsSavingDetails(false);
+      addAlert('success', 'Profile Updated', `Account details and default warehouse (${defaultWarehouse.split('(')[0].trim()}) saved.`);
     }, 300);
   };
 
@@ -634,6 +643,34 @@ export const UserProfileModal: React.FC = () => {
                       <option value="CAD">CAD ($) — Canadian Dollar</option>
                     </select>
                   </div>
+                </div>
+
+                {/* Default Fulfillment Regional Warehouse (Transit Estimation Anchor) */}
+                <div className="p-4 rounded-2xl bg-neutral-900/60 border border-neutral-800 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="block text-xs font-semibold text-neutral-200 flex items-center gap-1.5">
+                      <Truck className="w-4 h-4 text-emerald-400" />
+                      <span>Default Regional Warehouse (Transit Anchor)</span>
+                    </label>
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-medium">
+                      Live Delivery Routing
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-neutral-400 leading-relaxed">
+                    Set your default regional logistics hub. All SKU result cards and product catalog cards calculate their estimated transit delivery days relative to this warehouse selection.
+                  </p>
+                  <select
+                    id="profile-default-warehouse-select"
+                    value={defaultWarehouse}
+                    onChange={(e) => setDefaultWarehouse(e.target.value)}
+                    className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-hidden focus:border-emerald-500 cursor-pointer"
+                  >
+                    {REGIONAL_HUBS.map(hub => (
+                      <option key={hub.id} value={hub.name}>
+                        {hub.name} — {hub.city}, {hub.state} ({hub.region})
+                      </option>
+                    ))}
+                  </select>
                 </div>
 
                 {/* Form Footer Save Button */}

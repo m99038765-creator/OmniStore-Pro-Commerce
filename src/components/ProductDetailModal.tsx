@@ -28,11 +28,14 @@ import {
   User,
   Filter,
   SlidersHorizontal,
-  ChevronDown
+  ChevronDown,
+  Plus
 } from 'lucide-react';
 import { Product, ProductReview } from '../types';
 import { useStore } from '../context/StoreContext';
 import { SkuAuditLogModal } from './SkuAuditLogModal';
+import { TransitEstimationBadge } from './TransitEstimationBadge';
+import { QuickShipIndicator } from './QuickShipIndicator';
 
 export const ProductDetailModal: React.FC = () => {
   const {
@@ -54,7 +57,10 @@ export const ProductDetailModal: React.FC = () => {
     setActiveInventoryAlertProduct,
     setSkuSearchQuery,
     addReview,
-    voteReviewHelpful
+    voteReviewHelpful,
+    updateWarehouseTags,
+    tagColorMap,
+    setTagColor
   } = useStore();
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
   const [quantity, setQuantity] = useState(1);
@@ -64,6 +70,21 @@ export const ProductDetailModal: React.FC = () => {
   const [alertEmail, setAlertEmail] = useState<string>('');
   const [isSimulatingDrop, setIsSimulatingDrop] = useState(false);
   const [isAuditModalOpen, setIsAuditModalOpen] = useState(false);
+
+  // Tag Management State
+  const [newTagName, setNewTagName] = useState('');
+  const [selectedTagColor, setSelectedTagColor] = useState('sky');
+
+  const handleAddNewTag = () => {
+    const trimmed = newTagName.trim();
+    if (!trimmed) return;
+    const current = product.warehouseTags || [];
+    if (!current.some(t => t.toLowerCase() === trimmed.toLowerCase())) {
+      updateWarehouseTags(product.id, [...current, trimmed]);
+      setTagColor(trimmed, selectedTagColor);
+    }
+    setNewTagName('');
+  };
 
   // Customer Reviews & Feedback state
   const [isWritingReview, setIsWritingReview] = useState(false);
@@ -380,6 +401,18 @@ export const ProductDetailModal: React.FC = () => {
                   {product.description}
                 </p>
 
+                {/* Logistics & Delivery Intelligence: Quick Ship Readiness & Transit Estimation */}
+                <div className="mt-3.5 flex flex-wrap items-center gap-2">
+                  <QuickShipIndicator
+                    product={product}
+                    size="md"
+                  />
+                  <TransitEstimationBadge
+                    product={product}
+                    size="md"
+                  />
+                </div>
+
                 {/* Price Display */}
                 <div className="mt-4 p-4 rounded-xl bg-neutral-950/70 border border-neutral-800/80 flex items-center justify-between">
                   <div>
@@ -589,6 +622,134 @@ export const ProductDetailModal: React.FC = () => {
                         <span className="text-neutral-200 font-medium">{value}</span>
                       </div>
                     ))}
+                  </div>
+                </div>
+
+                {/* Warehouse Tag Management Section */}
+                <div className="mt-5 pt-4 border-t border-neutral-800">
+                  <div className="flex items-center justify-between mb-2.5">
+                    <h4 className="text-xs font-semibold text-neutral-300 uppercase tracking-wider flex items-center gap-1.5">
+                      <Tag className="w-3.5 h-3.5 text-sky-400" />
+                      <span>Warehouse Tags & Custom Tagging</span>
+                    </h4>
+                    <span className="text-[10px] font-mono text-neutral-400">
+                      {(product.warehouseTags || []).length} Assigned
+                    </span>
+                  </div>
+
+                  {/* Assigned Tags List */}
+                  <div className="flex flex-wrap items-center gap-1.5 mb-3">
+                    {product.warehouseTags && product.warehouseTags.length > 0 ? (
+                      product.warehouseTags.map(tag => {
+                        const assignedColor = tagColorMap[tag] || tagColorMap[tag.toLowerCase()] || 'sky';
+                        let colorClasses = 'bg-sky-500/15 text-sky-300 border-sky-500/30';
+                        if (assignedColor === 'amber' || tag.toLowerCase().includes('fragile')) colorClasses = 'bg-amber-500/20 text-amber-300 border-amber-500/40 font-bold';
+                        else if (assignedColor === 'purple' || tag.toLowerCase().includes('heavy')) colorClasses = 'bg-purple-500/20 text-purple-300 border-purple-500/40 font-bold';
+                        else if (assignedColor === 'rose' || tag.toLowerCase().includes('flammable') || tag.toLowerCase().includes('hazard')) colorClasses = 'bg-rose-500/20 text-rose-300 border-rose-500/40 font-bold';
+                        else if (assignedColor === 'emerald' || tag.toLowerCase().includes('priority')) colorClasses = 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 font-bold';
+                        else if (assignedColor === 'indigo' || tag.toLowerCase().includes('oversized')) colorClasses = 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40 font-bold';
+
+                        return (
+                          <span
+                            key={tag}
+                            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-mono border ${colorClasses} group`}
+                          >
+                            <span>{tag}</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const current = product.warehouseTags || [];
+                                const updated = current.filter(t => t !== tag);
+                                updateWarehouseTags(product.id, updated);
+                              }}
+                              className="text-neutral-400 hover:text-white p-0.5 rounded transition-colors"
+                              title={`Remove tag "${tag}"`}
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </span>
+                        );
+                      })
+                    ) : (
+                      <span className="text-xs text-neutral-500 italic">No warehouse tags assigned yet.</span>
+                    )}
+                  </div>
+
+                  {/* Add / Create Custom Color-Coded Tag Form */}
+                  <div className="p-3 rounded-xl bg-neutral-950/70 border border-neutral-800 space-y-2.5">
+                    <div className="flex items-center gap-2">
+                      <input
+                        id="new-tag-input"
+                        type="text"
+                        value={newTagName}
+                        onChange={(e) => setNewTagName(e.target.value)}
+                        placeholder="Create or assign custom tag (e.g. 'Priority VVIP')..."
+                        className="flex-1 bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-1.5 text-xs text-white placeholder:text-neutral-500 font-mono focus:outline-none focus:ring-1 focus:ring-sky-500"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleAddNewTag}
+                        disabled={!newTagName.trim()}
+                        className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-sky-600 hover:bg-sky-500 disabled:opacity-40 text-white transition-colors shrink-0 flex items-center gap-1"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Assign Tag</span>
+                      </button>
+                    </div>
+
+                    {/* Color Theme Selector */}
+                    <div className="flex items-center justify-between pt-1">
+                      <span className="text-[11px] text-neutral-400">Tag Color Theme:</span>
+                      <div className="flex items-center gap-1.5">
+                        {[
+                          { id: 'sky', label: 'Sky', bg: 'bg-sky-500' },
+                          { id: 'emerald', label: 'Emerald', bg: 'bg-emerald-500' },
+                          { id: 'amber', label: 'Amber', bg: 'bg-amber-500' },
+                          { id: 'purple', label: 'Purple', bg: 'bg-purple-500' },
+                          { id: 'rose', label: 'Rose', bg: 'bg-rose-500' },
+                          { id: 'indigo', label: 'Indigo', bg: 'bg-indigo-500' },
+                        ].map(col => (
+                          <button
+                            key={col.id}
+                            type="button"
+                            onClick={() => setSelectedTagColor(col.id)}
+                            className={`w-5 h-5 rounded-full ${col.bg} transition-all ${
+                              selectedTagColor === col.id ? 'ring-2 ring-white scale-110' : 'opacity-60 hover:opacity-100'
+                            }`}
+                            title={col.label}
+                          />
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Quick Preset Tags */}
+                    <div className="pt-1.5 border-t border-neutral-800/80 flex flex-wrap items-center gap-1.5">
+                      <span className="text-[10px] text-neutral-500 mr-1">Quick Presets:</span>
+                      {['Fragile', 'Heavy Duty', 'Priority', 'Flammable', 'Oversized', 'Secure Vault'].map(preset => {
+                        const isAssigned = (product.warehouseTags || []).includes(preset);
+                        return (
+                          <button
+                            key={preset}
+                            type="button"
+                            disabled={isAssigned}
+                            onClick={() => {
+                              const current = product.warehouseTags || [];
+                              if (!current.includes(preset)) {
+                                updateWarehouseTags(product.id, [...current, preset]);
+                                setTagColor(preset, preset === 'Fragile' ? 'amber' : preset === 'Heavy Duty' ? 'purple' : preset === 'Priority' ? 'emerald' : 'sky');
+                              }
+                            }}
+                            className={`text-[10px] font-mono px-2 py-0.5 rounded border transition-colors ${
+                              isAssigned
+                                ? 'bg-neutral-900 text-neutral-600 border-neutral-800 cursor-not-allowed'
+                                : 'bg-neutral-900 hover:bg-neutral-800 text-neutral-300 border-neutral-700'
+                            }`}
+                          >
+                            + {preset}
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
                 </div>
 

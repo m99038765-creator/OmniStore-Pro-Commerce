@@ -12,9 +12,11 @@ import {
   Layers,
   ArrowUpRight,
   Sparkles,
-  ClipboardList
+  ClipboardList,
+  Tag
 } from 'lucide-react';
 import { Product } from '../types';
+import { useStore } from '../context/StoreContext';
 
 interface SkuDetailsModalProps {
   product: Product | null;
@@ -38,6 +40,24 @@ export const SkuDetailsModal: React.FC<SkuDetailsModalProps> = ({
   onJumpToRow
 }) => {
   if (!isOpen || !product) return null;
+
+  const { updateWarehouseTags } = useStore();
+  const [tagInput, setTagInput] = React.useState('');
+  const currentTags = product.warehouseTags || [];
+
+  const handleAddTag = (tagToAdd: string) => {
+    const trimmed = tagToAdd.trim();
+    if (!trimmed) return;
+    if (currentTags.some(t => t.toLowerCase() === trimmed.toLowerCase())) return;
+    const updated = [...currentTags, trimmed];
+    updateWarehouseTags(product.id, updated);
+    setTagInput('');
+  };
+
+  const handleRemoveTag = (tagToRemove: string) => {
+    const updated = currentTags.filter(t => t !== tagToRemove);
+    updateWarehouseTags(product.id, updated);
+  };
 
   const isOutOfStock = product.stock <= 0;
   const isLowStock = product.stock > 0 && product.stock <= product.lowStockThreshold;
@@ -144,6 +164,88 @@ export const SkuDetailsModal: React.FC<SkuDetailsModalProps> = ({
             <p className="text-xs font-mono font-semibold text-white">
               {product.warehouse}
             </p>
+          </div>
+
+          {/* Warehouse Tags Management Section */}
+          <div className="p-3.5 rounded-xl bg-neutral-950 border border-neutral-800 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] uppercase font-semibold text-neutral-400 flex items-center gap-1">
+                <Tag className="w-3.5 h-3.5 text-sky-400" />
+                <span>Custom Warehouse Tags (Fast Identification)</span>
+              </span>
+              <span className="text-[10px] font-mono text-neutral-500">{currentTags.length} Active</span>
+            </div>
+
+            {/* Current Tags Badges */}
+            <div className="flex flex-wrap items-center gap-1.5 min-h-[28px]">
+              {currentTags.length === 0 ? (
+                <span className="text-xs text-neutral-500 italic">No warehouse tags assigned yet. Add presets or custom tags below.</span>
+              ) : (
+                currentTags.map(tag => (
+                  <span
+                    key={tag}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-sky-500/15 text-sky-300 border border-sky-500/30 font-mono"
+                  >
+                    {tag}
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveTag(tag)}
+                      className="text-sky-400 hover:text-white transition-colors cursor-pointer"
+                      title={`Remove tag ${tag}`}
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </span>
+                ))
+              )}
+            </div>
+
+            {/* Quick Presets */}
+            <div className="pt-2 border-t border-neutral-900 flex flex-wrap items-center gap-1.5">
+              <span className="text-[10px] font-mono text-neutral-500 mr-1">Presets:</span>
+              {['Fragile', 'Heavy', 'Flammable', 'Hazardous', 'High Priority', 'Refrigerate'].map(preset => {
+                const assigned = currentTags.some(t => t.toLowerCase() === preset.toLowerCase());
+                return (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => (assigned ? handleRemoveTag(preset) : handleAddTag(preset))}
+                    className={`text-[10px] font-mono px-2 py-0.5 rounded-md border transition-all cursor-pointer ${
+                      assigned
+                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 font-bold'
+                        : 'bg-neutral-900 hover:bg-neutral-800 text-neutral-400 border-neutral-800'
+                    }`}
+                  >
+                    {assigned ? '✓ ' : '+ '} {preset}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Custom Tag Input */}
+            <div className="flex items-center gap-2 pt-1">
+              <input
+                type="text"
+                value={tagInput}
+                onChange={e => setTagInput(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleAddTag(tagInput);
+                  }
+                }}
+                placeholder="Type custom tag (e.g. 'Oversized')..."
+                className="flex-1 px-3 py-1.5 rounded-lg bg-neutral-900 border border-neutral-800 text-xs text-white placeholder:text-neutral-500 focus:outline-none focus:border-sky-500 font-mono"
+              />
+              <button
+                type="button"
+                onClick={() => handleAddTag(tagInput)}
+                disabled={!tagInput.trim()}
+                className="px-3 py-1.5 rounded-lg bg-sky-500 hover:bg-sky-400 disabled:opacity-50 text-neutral-950 font-bold text-xs transition-colors cursor-pointer"
+              >
+                Add Tag
+              </button>
+            </div>
           </div>
 
           {/* Technical Specifications */}

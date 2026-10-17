@@ -43,6 +43,13 @@ interface StoreContextType {
   isAdminOpen: boolean;
   adminActiveTab: 'inventory' | 'batch' | 'scanner';
   adminSelectedProductIds: string[];
+  selectedCatalogProductIds: string[];
+  setSelectedCatalogProductIds: React.Dispatch<React.SetStateAction<string[]>>;
+  toggleSelectCatalogProduct: (productId: string) => void;
+  selectAllCatalogProducts: (productIds?: string[]) => void;
+  clearSelectedCatalogProducts: () => void;
+  bulkAddSelectedToCart: () => { addedCount: number; outOfStockCount: number };
+  bulkAddSelectedToWarehouseQueue: () => void;
   isTrackingOpen: boolean;
   quickViewProduct: Product | null;
   qrCodeProduct: Product | null;
@@ -57,12 +64,19 @@ interface StoreContextType {
   sortBy: 'featured' | 'price-asc' | 'price-desc' | 'stock-desc' | 'stock-asc' | 'rating';
   onlyInStock: boolean;
   onlyLowStock: boolean;
+  userReservations: Record<string, number>;
+  reserveItem: (productId: string) => { success: boolean; message?: string };
+  isReserved: (productId: string) => boolean;
   
   // Safe Mode (Audit Log Quarantine & Damage Protection)
   isSafeModeEnabled: boolean;
   setIsSafeModeEnabled: (enabled: boolean) => void;
   warehouseAuditLogs: SkuAuditLogEntry[];
   checkSkuSafety: (sku: string) => SkuSafetyCheckResult;
+
+  // Customer Default Warehouse Selection & Transit
+  customerDefaultWarehouse: string;
+  setCustomerDefaultWarehouse: (warehouseName: string) => void;
   
   // Price Alerts
   inventoryAlerts: InventoryAlert[];
@@ -150,6 +164,16 @@ interface StoreContextType {
     location?: string;
   }) => Promise<{ success: boolean; error?: string }>;
   voteReviewHelpful: (productId: string, reviewId: string) => Promise<void>;
+  updateWarehouseTags: (productId: string, tags: string[]) => void;
+  batchUpdateWarehouseTags: (productIds: string[], tag: string, action: 'add' | 'remove') => void;
+  showWarehouseTags: boolean;
+  setShowWarehouseTags: (show: boolean) => void;
+  tagColorMap: Record<string, string>;
+  setTagColor: (tagName: string, color: string) => void;
+  getFrequentlySearchedTogether: (sku: string) => Product[];
+  recentSearchedSkus: string[];
+  maxDeliveryDays: number | null;
+  setMaxDeliveryDays: (days: number | null) => void;
 }
 
 const StoreContext = createContext<StoreContextType | null>(null);
@@ -231,6 +255,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [isAdminOpen, setIsAdminOpen] = useState(false);
   const [adminActiveTab, setAdminActiveTab] = useState<'inventory' | 'batch' | 'scanner'>('inventory');
   const [adminSelectedProductIds, setAdminSelectedProductIds] = useState<string[]>([]);
+  const [selectedCatalogProductIds, setSelectedCatalogProductIds] = useState<string[]>([]);
   const [isTrackingOpen, setIsTrackingOpen] = useState(false);
   const [quickViewProduct, setQuickViewProduct] = useState<Product | null>(null);
   const [skuAdjustProduct, setSkuAdjustProduct] = useState<Product | null>(null);
@@ -324,6 +349,31 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     }
   }, [userProfile]);
 
+  // Customer Default Warehouse Selection for Real-Time Transit Estimation
+  const [customerDefaultWarehouse, setCustomerDefaultWarehouseState] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem('omnistore_customer_default_warehouse');
+      if (saved) return saved;
+      if (userProfile?.defaultWarehouse) return userProfile.defaultWarehouse;
+    } catch {
+      // ignore
+    }
+    return userProfile?.defaultWarehouse || 'Bay Area Hub (WH-01)';
+  });
+
+  const setCustomerDefaultWarehouse = useCallback((warehouseName: string) => {
+    setCustomerDefaultWarehouseState(warehouseName);
+    try {
+      localStorage.setItem('omnistore_customer_default_warehouse', warehouseName);
+    } catch {
+      // ignore
+    }
+    setUserProfile(prev => ({
+      ...prev,
+      defaultWarehouse: warehouseName,
+    }));
+  }, []);
+
   const inventoryAlertsRef = useRef<InventoryAlert[]>([]);
   useEffect(() => {
     inventoryAlertsRef.current = inventoryAlerts;
@@ -376,6 +426,153 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       setAlerts(prev => prev.filter(a => a.id !== newAlert.id));
     }, 6000);
   }, []);
+
+  const [userReservations, setUserReservations] = useState<Record<string, number>>(() => {
+    try {
+      const saved = localStorage.getItem('omnistore_user_reservations');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  const [showWarehouseTags, setShowWarehouseTags] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('omnistore_show_warehouse_tags');
+      return saved !== null ? JSON.parse(saved) : true;
+    } catch {
+      return true;
+    }
+  });
+
+  const [tagColorMap, setTagColorMap] = useState<Record<string, string>>(() => {
+    try {
+      const saved = localStorage.getItem('omnistore_tag_color_map');
+      return saved ? JSON.parse(saved) : {
+        'Fragile': 'amber',
+        'Heavy': 'purple',
+        'Flammable': 'rose',
+        'Priority': 'emerald',
+        'Hazard': 'rose',
+        'Oversized': 'indigo',
+        'Cold Chain': 'sky',
+        'Secure Vault': 'amber'
+      };
+    } catch {
+      return {};
+    }
+  });
+
+  const [skuCooccurrences, setSkuCooccurrences] = useState<Record<string, Record<string, number>>>(() => {
+    try {
+      const saved = localStorage.getItem('omnistore_sku_cooccurrences');
+      return saved ? JSON.parse(saved) : {
+        'AUD-REF-8040': { 'KB-TITAN-75': 14, 'CAM-PRO-9K': 9, 'MIC-STU-X': 6 },
+        'KB-TITAN-75': { 'AUD-REF-8040': 14, 'MOU-ERG-PRO': 11, 'PAD-DESK-XL': 8 },
+        'CAM-PRO-9K': { 'MIC-STU-X': 18, 'LIG-PAN-LED': 10, 'AUD-REF-8040': 9 },
+        'MIC-STU-X': { 'CAM-PRO-9K': 18, 'ARM-MIC-PRO': 12, 'AUD-REF-8040': 6 }
+      };
+    } catch {
+      return {};
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('omnistore_sku_cooccurrences', JSON.stringify(skuCooccurrences));
+    } catch {}
+  }, [skuCooccurrences]);
+
+  const [recentSearchedSkus, setRecentSearchedSkus] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('omnistore_recent_searched_skus');
+      return saved ? JSON.parse(saved) : ['AUD-REF-8040', 'KB-TITAN-75', 'CAM-PRO-9K', 'MIC-STU-X', 'MOU-ERG-PRO'];
+    } catch {
+      return ['AUD-REF-8040', 'KB-TITAN-75', 'CAM-PRO-9K', 'MIC-STU-X', 'MOU-ERG-PRO'];
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('omnistore_recent_searched_skus', JSON.stringify(recentSearchedSkus));
+    } catch {}
+  }, [recentSearchedSkus]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('omnistore_show_warehouse_tags', JSON.stringify(showWarehouseTags));
+    } catch {}
+  }, [showWarehouseTags]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('omnistore_tag_color_map', JSON.stringify(tagColorMap));
+    } catch {}
+  }, [tagColorMap]);
+
+  const setTagColor = (tagName: string, color: string) => {
+    setTagColorMap(prev => ({ ...prev, [tagName]: color }));
+  };
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('omnistore_user_reservations', JSON.stringify(userReservations));
+    } catch {}
+  }, [userReservations]);
+
+  // Periodic timer to check and release expired 15-min reservations
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      setUserReservations(prev => {
+        let changed = false;
+        const next = { ...prev };
+        for (const [prodId, expiry] of Object.entries(next)) {
+          if (now >= (expiry as number)) {
+            delete next[prodId];
+            changed = true;
+            setProducts(pList => pList.map(p => p.id === prodId ? { ...p, reserved: Math.max(0, p.reserved - 1) } : p));
+            addAlert('info', 'Reservation Expired', '15-minute temporary stock lock expired for item.');
+          }
+        }
+        return changed ? next : prev;
+      });
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [addAlert]);
+
+  const reserveItem = (productId: string): { success: boolean; message?: string } => {
+    const product = products.find(p => p.id === productId);
+    if (!product) return { success: false, message: 'Product not found' };
+
+    if (userReservations[productId] && Date.now() < userReservations[productId]) {
+      addAlert('info', 'Already Reserved', `You already have an active 15-minute stock lock on "${product.name}".`);
+      return { success: true, message: 'Already reserved' };
+    }
+
+    if (product.stock <= product.reserved) {
+      addAlert('warning', 'No Units Available for Lock', `All available units of "${product.name}" are currently stocked or reserved.`);
+      return { success: false, message: 'No units available for reservation' };
+    }
+
+    const expiryTime = Date.now() + 15 * 60 * 1000; // 15 minutes
+    setUserReservations(prev => ({ ...prev, [productId]: expiryTime }));
+
+    // Increment reserved count in inventory data
+    setProducts(prev => prev.map(p => p.id === productId ? { ...p, reserved: p.reserved + 1 } : p));
+
+    addAlert(
+      'success',
+      '🔒 15-Min Stock Lock Secured',
+      `Temporary reservation created for "${product.name}". Reserved count updated in inventory data. Expires in 15 mins.`
+    );
+    return { success: true };
+  };
+
+  const isReserved = (productId: string) => {
+    const expiry = userReservations[productId];
+    return Boolean(expiry && Date.now() < expiry);
+  };
 
   const dismissAlert = useCallback((id: string) => {
     setAlerts(prev => prev.filter(a => a.id !== id));
@@ -843,6 +1040,77 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     setCart([]);
   };
 
+  // Catalog Multi-Select Bulk Actions
+  const toggleSelectCatalogProduct = useCallback((productId: string) => {
+    setSelectedCatalogProductIds(prev =>
+      prev.includes(productId) ? prev.filter(id => id !== productId) : [...prev, productId]
+    );
+  }, []);
+
+  const selectAllCatalogProducts = useCallback((productIds?: string[]) => {
+    if (productIds && productIds.length > 0) {
+      setSelectedCatalogProductIds(Array.from(new Set(productIds)));
+    } else {
+      setSelectedCatalogProductIds(products.map(p => p.id));
+    }
+  }, [products]);
+
+  const clearSelectedCatalogProducts = useCallback(() => {
+    setSelectedCatalogProductIds([]);
+  }, []);
+
+  const bulkAddSelectedToCart = useCallback((): { addedCount: number; outOfStockCount: number } => {
+    const selectedProds = products.filter(p => selectedCatalogProductIds.includes(p.id));
+    if (selectedProds.length === 0) return { addedCount: 0, outOfStockCount: 0 };
+
+    let addedCount = 0;
+    let outOfStockCount = 0;
+
+    selectedProds.forEach(product => {
+      if (product.stock > 0) {
+        const res = addToCart(product, 1, { silentToast: true });
+        if (res.success) {
+          addedCount++;
+        }
+      } else {
+        outOfStockCount++;
+      }
+    });
+
+    if (addedCount > 0) {
+      addAlert(
+        'success',
+        'Bulk Items Added to Cart',
+        `Successfully added ${addedCount} item${addedCount > 1 ? 's' : ''} to your cart.${
+          outOfStockCount > 0
+            ? ` (${outOfStockCount} out-of-stock item${outOfStockCount > 1 ? 's were' : ' was'} omitted)`
+            : ''
+        }`
+      );
+      setIsCartOpen(true);
+    } else if (outOfStockCount > 0) {
+      addAlert(
+        'warning',
+        'Selected Items Out of Stock',
+        `All ${outOfStockCount} selected item${outOfStockCount > 1 ? 's are' : ' is'} currently sold out in all fulfillment centers.`
+      );
+    }
+
+    return { addedCount, outOfStockCount };
+  }, [products, selectedCatalogProductIds, addToCart, addAlert, setIsCartOpen]);
+
+  const bulkAddSelectedToWarehouseQueue = useCallback(() => {
+    if (selectedCatalogProductIds.length === 0) return;
+    setAdminSelectedProductIds(prev => Array.from(new Set([...prev, ...selectedCatalogProductIds])));
+    setAdminActiveTab('batch');
+    setIsAdminOpen(true);
+    addAlert(
+      'info',
+      'Queued for Warehouse Batch Update',
+      `Loaded ${selectedCatalogProductIds.length} SKU${selectedCatalogProductIds.length > 1 ? 's' : ''} into the warehouse Bulk Inventory Update queue.`
+    );
+  }, [selectedCatalogProductIds, addAlert, setAdminSelectedProductIds, setAdminActiveTab, setIsAdminOpen]);
+
   // Payment & Checkout
   const processCheckout = async (payload: {
     shippingDetails: ShippingDetails;
@@ -1251,6 +1519,41 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  const updateWarehouseTags = (productId: string, tags: string[]) => {
+    setProducts(prev => prev.map(p => p.id === productId ? { ...p, warehouseTags: tags } : p));
+    setQuickViewProduct(prev => prev && prev.id === productId ? { ...prev, warehouseTags: tags } : prev);
+    addAlert('success', 'Warehouse Tags Updated', 'Custom warehouse tags updated successfully.');
+  };
+
+  const batchUpdateWarehouseTags = (productIds: string[], tag: string, action: 'add' | 'remove') => {
+    const trimmed = tag.trim();
+    if (!trimmed || productIds.length === 0) return;
+
+    setProducts(prev =>
+      prev.map(p => {
+        if (!productIds.includes(p.id)) return p;
+        const existingTags = p.warehouseTags || [];
+        let newTags = [...existingTags];
+        if (action === 'add') {
+          if (!newTags.some(t => t.toLowerCase() === trimmed.toLowerCase())) {
+            newTags.push(trimmed);
+          }
+        } else {
+          newTags = newTags.filter(t => t.toLowerCase() !== trimmed.toLowerCase());
+        }
+        return { ...p, warehouseTags: newTags };
+      })
+    );
+
+    addAlert(
+      'success',
+      'Batch Tags Updated',
+      action === 'add'
+        ? `Applied tag "${trimmed}" to ${productIds.length} selected items.`
+        : `Removed tag "${trimmed}" from ${productIds.length} selected items.`
+    );
+  };
+
   // Order History management
   const updateOrderStatus = (orderId: string, newStatus: Order['status']) => {
     setOrders(prev =>
@@ -1639,6 +1942,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     return false;
   }, [addAlert, fetchInitialData]);
 
+  const [recentSessionSkus, setRecentSessionSkus] = useState<string[]>([]);
+
   const trackSkuSearch = useCallback((query: string) => {
     const normalized = query.trim().toUpperCase();
     if (!normalized) return;
@@ -1652,7 +1957,56 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       }
       return updated.sort((a, b) => b.count - a.count).slice(0, 5); // Keep top 5
     });
+
+    setRecentSearchedSkus(prev => {
+      const upper = normalized;
+      const filtered = prev.filter(s => s.toUpperCase() !== upper);
+      return [upper, ...filtered].slice(0, 5);
+    });
+
+    setRecentSessionSkus(prevSession => {
+      if (prevSession[prevSession.length - 1] === normalized) return prevSession;
+      const updatedSession = [...prevSession, normalized].slice(-5);
+
+      setSkuCooccurrences(prevCooc => {
+        const nextCooc = { ...prevCooc };
+        prevSession.forEach(existingSku => {
+          if (existingSku !== normalized) {
+            if (!nextCooc[normalized]) nextCooc[normalized] = {};
+            nextCooc[normalized][existingSku] = (nextCooc[normalized][existingSku] || 0) + 1;
+
+            if (!nextCooc[existingSku]) nextCooc[existingSku] = {};
+            nextCooc[existingSku][normalized] = (nextCooc[existingSku][normalized] || 0) + 1;
+          }
+        });
+        return nextCooc;
+      });
+
+      return updatedSession;
+    });
   }, []);
+
+  const getFrequentlySearchedTogether = useCallback((sku: string): Product[] => {
+    const norm = sku.trim().toUpperCase();
+    const coocMap = skuCooccurrences[norm] || {};
+    const sortedSkus = Object.entries(coocMap)
+      .sort((a, b) => Number(b[1]) - Number(a[1]))
+      .map(([s]) => s);
+
+    const result = sortedSkus
+      .map(s => products.find(p => p.sku.toUpperCase() === s))
+      .filter((p): p is Product => !!p && p.sku.toUpperCase() !== norm);
+
+    if (result.length < 3) {
+      const primaryProduct = products.find(p => p.sku.toUpperCase() === norm);
+      if (primaryProduct) {
+        const sameCategory = products.filter(p => p.category === primaryProduct.category && p.sku.toUpperCase() !== norm && !result.some(r => r.id === p.id));
+        result.push(...sameCategory);
+      }
+    }
+
+    return result.slice(0, 3);
+  }, [skuCooccurrences, products]);
 
   return (
     <StoreContext.Provider
@@ -1706,12 +2060,21 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         setIsSafeModeEnabled,
         warehouseAuditLogs,
         checkSkuSafety,
+        customerDefaultWarehouse,
+        setCustomerDefaultWarehouse,
         setOnlyWishlist,
         setIsCartOpen,
         setIsCheckoutOpen,
         setIsAdminOpen,
         setAdminActiveTab,
         setAdminSelectedProductIds,
+        selectedCatalogProductIds,
+        setSelectedCatalogProductIds,
+        toggleSelectCatalogProduct,
+        selectAllCatalogProducts,
+        clearSelectedCatalogProducts,
+        bulkAddSelectedToCart,
+        bulkAddSelectedToWarehouseQueue,
         setIsTrackingOpen,
         isOrderHistoryOpen,
         setIsOrderHistoryOpen,
@@ -1754,7 +2117,18 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         offlineInventoryQueue,
         syncOfflineInventory,
         addReview,
-        voteReviewHelpful
+        voteReviewHelpful,
+        updateWarehouseTags,
+        batchUpdateWarehouseTags,
+        userReservations,
+        reserveItem,
+        isReserved,
+        showWarehouseTags,
+        setShowWarehouseTags,
+        tagColorMap,
+        setTagColor,
+        getFrequentlySearchedTogether,
+        recentSearchedSkus
       }}
     >
       {children}
