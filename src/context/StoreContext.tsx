@@ -4,6 +4,7 @@ import { INITIAL_SAMPLE_ORDERS, createSampleOrder } from '../data/sampleOrders';
 import { INITIAL_USER_PROFILE } from '../data/initialUserProfile';
 import { INITIAL_SKU_AUDIT_LOGS } from '../data/initialAuditLogs';
 import { checkSkuAuditLogSafety } from '../utils/skuAuditSafety';
+import { detectSkuRegionalConflict, SkuRegionalConflict } from '../utils/inventoryConflicts';
 
 let _globalIdCounter = 0;
 const _getUniqueId = (prefix = "id") => `${prefix}_${Date.now()}_${++_globalIdCounter}`;
@@ -41,7 +42,7 @@ interface StoreContextType {
   isCartOpen: boolean;
   isCheckoutOpen: boolean;
   isAdminOpen: boolean;
-  adminActiveTab: 'inventory' | 'batch' | 'scanner';
+  adminActiveTab: 'inventory' | 'batch' | 'reconcile' | 'scanner';
   adminSelectedProductIds: string[];
   selectedCatalogProductIds: string[];
   setSelectedCatalogProductIds: React.Dispatch<React.SetStateAction<string[]>>;
@@ -73,6 +74,9 @@ interface StoreContextType {
   setIsSafeModeEnabled: (enabled: boolean) => void;
   warehouseAuditLogs: SkuAuditLogEntry[];
   checkSkuSafety: (sku: string) => SkuSafetyCheckResult;
+  toggleSkuDamagedFlag: (product: Product) => boolean;
+  refreshWarehouseAuditLogs: () => Promise<SkuAuditLogEntry[]>;
+  clearSkuAuditFlags: (sku: string, auditorName?: string) => Promise<boolean>;
 
   // Customer Default Warehouse Selection & Transit
   customerDefaultWarehouse: string;
@@ -103,7 +107,7 @@ interface StoreContextType {
   setIsCartOpen: (open: boolean) => void;
   setIsCheckoutOpen: (open: boolean) => void;
   setIsAdminOpen: (open: boolean) => void;
-  setAdminActiveTab: (tab: 'inventory' | 'batch' | 'scanner') => void;
+  setAdminActiveTab: (tab: 'inventory' | 'batch' | 'reconcile' | 'scanner') => void;
   setAdminSelectedProductIds: React.Dispatch<React.SetStateAction<string[]>>;
   setIsTrackingOpen: (open: boolean) => void;
   setIsOrderHistoryOpen: (open: boolean) => void;
@@ -182,6 +186,27 @@ interface StoreContextType {
   resolveWarehouseConflict: (conflictId: string, resolution: 'override' | 'yield' | 'refresh') => Promise<void>;
   reportInventoryEditingSession: (sku: string, productId: string, status: 'start' | 'stop', action?: string) => Promise<void>;
   simulateWarehouseConflict: (sku?: string) => Promise<WarehouseConflictEvent | null>;
+  chartDrilldownSku: string | null;
+  setChartDrilldownSku: (sku: string | null) => void;
+  drillDownToInventoryChart: (sku: string) => void;
+  resolvedRegionalConflictSkus: string[];
+  resolveRegionalConflict: (sku: string, productName?: string) => void;
+  getSkuRegionalConflict: (product: Product) => SkuRegionalConflict | null;
+  selectedDiscrepancySkus: string[];
+  setSelectedDiscrepancySkus: React.Dispatch<React.SetStateAction<string[]>>;
+  toggleDiscrepancySkuSelection: (sku: string) => void;
+  reconciledDiscrepancySkus: string[];
+  openBatchReconcileForSkus: (skus?: string[]) => void;
+  batchClearAndReconcileDiscrepancies: (
+    skus: string[],
+    auditNote: string
+  ) => Promise<{
+    success: boolean;
+    reconciledCount: number;
+    skus: string[];
+    auditNote: string;
+    timestamp: string;
+  }>;
 }
 
 const StoreContext = createContext<StoreContextType | null>(null);
@@ -261,7 +286,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [isCartOpen, setIsCartOpen] = useState(false);
   const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
   const [isAdminOpen, setIsAdminOpen] = useState(false);
-  const [adminActiveTab, setAdminActiveTab] = useState<'inventory' | 'batch' | 'scanner'>('inventory');
+  const [adminActiveTab, setAdminActiveTab] = useState<'inventory' | 'batch' | 'reconcile' | 'scanner'>('inventory');
   const [adminSelectedProductIds, setAdminSelectedProductIds] = useState<string[]>([]);
   const [adminTargetProductId, setAdminTargetProductId] = useState<string | null>(null);
   const [selectedCatalogProductIds, setSelectedCatalogProductIds] = useState<string[]>([]);
@@ -272,6 +297,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [comparedProductIds, setComparedProductIds] = useState<string[]>([]);
   const [isCompareModalOpen, setIsCompareModalOpen] = useState(false);
   const [warehouseConflicts, setWarehouseConflicts] = useState<WarehouseConflictEvent[]>([]);
+  const [chartDrilldownSku, setChartDrilldownSku] = useState<string | null>(null);
+  const [resolvedRegionalConflictSkus, setResolvedRegionalConflictSkus] = useState<string[]>([]);
+  const [selectedDiscrepancySkus, setSelectedDiscrepancySkus] = useState<string[]>([]);
+  const [reconciledDiscrepancySkus, setReconciledDiscrepancySkus] = useState<string[]>([]);
   const [wishlistProductIds, setWishlistProductIds] = useState<string[]>(() => {
     try {
       const saved = localStorage.getItem('omnistore_wishlist');
@@ -324,18 +353,43 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   }, [isSafeModeEnabled]);
 
   const [warehouseAuditLogs, setWarehouseAuditLogs] = useState<SkuAuditLogEntry[]>(INITIAL_SKU_AUDIT_LOGS);
+  const warehouseAuditLogsRef = useRef<SkuAuditLogEntry[]>(warehouseAuditLogs);
+  useEffect(() => {
+    warehouseAuditLogsRef.current = warehouseAuditLogs;
+  }, [warehouseAuditLogs]);
+
+  const refreshWarehouseAuditLogs = useCallback(async (): Promise<SkuAuditLogEntry[]> => {
+    try {
+      const res = await fetch('/api/inventory/audit-logs');
+      if (res.ok) {
+        const data = await res.json();
+        if (data && Array.isArray(data.logs) && data.logs.length > 0) {
+          const current = warehouseAuditLogsRef.current;
+          const byId = new Map<string, SkuAuditLogEntry>();
+          for (const entry of current) {
+            byId.set(entry.id, entry);
+          }
+          for (const entry of data.logs as SkuAuditLogEntry[]) {
+            byId.set(entry.id, entry);
+          }
+          const merged = Array.from(byId.values()).sort(
+            (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+          );
+          warehouseAuditLogsRef.current = merged;
+          setWarehouseAuditLogs(merged);
+          return merged;
+        }
+      }
+    } catch {
+      // fallback to latest in-memory audit logs
+    }
+    return warehouseAuditLogsRef.current;
+  }, []);
 
   // Sync full live audit logs from backend if available
   useEffect(() => {
-    fetch('/api/inventory/audit-logs')
-      .then(res => res.json())
-      .then(data => {
-        if (data && Array.isArray(data.logs) && data.logs.length > 0) {
-          setWarehouseAuditLogs(data.logs);
-        }
-      })
-      .catch(() => {});
-  }, []);
+    refreshWarehouseAuditLogs();
+  }, [refreshWarehouseAuditLogs]);
 
   const checkSkuSafety = useCallback((sku: string): SkuSafetyCheckResult => {
     return checkSkuAuditLogSafety(sku, warehouseAuditLogs);
@@ -452,6 +506,132 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       setAlerts(prev => prev.filter(a => a.id !== newAlert.id));
     }, 6000);
   }, []);
+
+  const toggleSkuDamagedFlag = useCallback((product: Product): boolean => {
+    const currentSafety = checkSkuAuditLogSafety(product.sku, warehouseAuditLogs);
+    const currentlyDamaged =
+      currentSafety.flagType === 'damaged' || currentSafety.flagType === 'both';
+
+    const latestTs = warehouseAuditLogs.reduce((max, log) => {
+      const ts = new Date(log.timestamp).getTime();
+      return Number.isFinite(ts) && ts > max ? ts : max;
+    }, 0);
+    const nextTimestamp = new Date(Math.max(Date.now(), latestTs + 1000)).toISOString();
+
+    const operatorName = userProfile?.displayName || 'Warehouse Manager';
+    const nextIsDamaged = !currentlyDamaged;
+
+    const newEntry: SkuAuditLogEntry = {
+      id: _getUniqueId('AUD-QF'),
+      sku: product.sku,
+      productId: product.id,
+      productName: product.name,
+      timestamp: nextTimestamp,
+      adjustmentValue: 0,
+      adjustmentType: 'reconciliation',
+      previousStock: product.stock,
+      newStock: product.stock,
+      operatorId: `OP-MGR (${operatorName})`,
+      operatorName,
+      reason: nextIsDamaged
+        ? 'Damaged Stock — Quick Flag'
+        : 'Damaged Flag Cleared — Quick Flag',
+      warehouse: product.warehouse,
+      notes: nextIsDamaged
+        ? 'Manually flagged as Damaged via catalog ProductCard Quick Flag shortcut. Immediate manager review required.'
+        : 'Damaged status cleared via catalog ProductCard Quick Flag shortcut. SKU verified and restored.'
+    };
+
+    setWarehouseAuditLogs(prev => [newEntry, ...prev]);
+
+    if (nextIsDamaged) {
+      const title = 'Critical Audit Flag: Damaged Stock';
+      const message = `${product.sku} (${product.name}) marked as Damaged via Quick Flag. Immediate manual review and validation required.`;
+      addAlert('critical', title, message);
+      if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
+        try {
+          new Notification(title, { body: message, icon: product.images?.[0] || '/favicon.ico' });
+        } catch {
+          // ignore notification errors in restricted contexts
+        }
+      }
+    } else {
+      addAlert(
+        'success',
+        'Damaged Flag Cleared',
+        `${product.sku} (${product.name}) has been cleared from Damaged status.`
+      );
+    }
+
+    return nextIsDamaged;
+  }, [warehouseAuditLogs, userProfile, addAlert]);
+
+  const clearSkuAuditFlags = useCallback(async (sku: string, auditorName?: string): Promise<boolean> => {
+    const normalizedSku = sku.trim().toUpperCase();
+    if (!normalizedSku) return false;
+
+    const matchedProduct = products.find(p => p.sku.trim().toUpperCase() === normalizedSku);
+    const currentLogs = warehouseAuditLogsRef.current;
+    const latestTs = currentLogs.reduce((max, log) => {
+      const ts = new Date(log.timestamp).getTime();
+      return Number.isFinite(ts) && ts > max ? ts : max;
+    }, 0);
+    const nextTimestamp = new Date(Math.max(Date.now(), latestTs + 1000)).toISOString();
+    const resolvedAuditor = auditorName || userProfile?.displayName || 'Sora Tanaka (QA Auditor)';
+
+    const clearanceEntry: SkuAuditLogEntry = {
+      id: _getUniqueId('AUD-CLR'),
+      sku: matchedProduct?.sku || normalizedSku,
+      productId: matchedProduct?.id,
+      productName: matchedProduct?.name || normalizedSku,
+      timestamp: nextTimestamp,
+      adjustmentValue: 0,
+      adjustmentType: 'reconciliation',
+      previousStock: matchedProduct?.stock ?? 0,
+      newStock: matchedProduct?.stock ?? 0,
+      operatorId: `AUD-QA (${resolvedAuditor})`,
+      operatorName: resolvedAuditor,
+      reason: 'Auditor Clearance: Quarantine & Damaged Flags Cleared',
+      warehouse: matchedProduct?.warehouse || 'Bay Area Hub (WH-01)',
+      notes: 'Cleared by auditor — Quarantine and Damaged flags verified resolved; SKU released for catalog display.'
+    };
+
+    try {
+      await fetch('/api/inventory/audit-logs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sku: clearanceEntry.sku,
+          productName: clearanceEntry.productName,
+          adjustmentValue: 0,
+          adjustmentType: 'reconciliation',
+          previousStock: clearanceEntry.previousStock,
+          newStock: clearanceEntry.newStock,
+          operatorId: clearanceEntry.operatorId,
+          operatorName: clearanceEntry.operatorName,
+          reason: clearanceEntry.reason,
+          warehouse: clearanceEntry.warehouse,
+          notes: clearanceEntry.notes
+        })
+      });
+    } catch {
+      // proceed with local state update even if API request fails
+    }
+
+    setWarehouseAuditLogs(prev => {
+      const next = [clearanceEntry, ...prev];
+      warehouseAuditLogsRef.current = next;
+      return next;
+    });
+
+    addAlert(
+      'success',
+      'Audit Flag Cleared by Auditor',
+      `${clearanceEntry.sku} (${clearanceEntry.productName}) cleared from Quarantine / Damaged hold and restored to active catalog.`
+    );
+
+    return true;
+  }, [products, userProfile, addAlert]);
 
   const [userReservations, setUserReservations] = useState<Record<string, number>>(() => {
     try {
@@ -718,6 +898,220 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     }
     return null;
   }, []);
+
+  const drillDownToInventoryChart = useCallback((sku: string) => {
+    setChartDrilldownSku(sku);
+    if (typeof document !== 'undefined') {
+      requestAnimationFrame(() => {
+        const chartEl = document.getElementById('warehouse-inventory-distribution-dashboard');
+        if (chartEl) {
+          chartEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      });
+    }
+  }, []);
+
+  const getSkuRegionalConflict = useCallback(
+    (product: Product): SkuRegionalConflict | null => {
+      return detectSkuRegionalConflict(
+        product,
+        warehouseAuditLogs,
+        warehouseConflicts,
+        resolvedRegionalConflictSkus
+      );
+    },
+    [warehouseAuditLogs, warehouseConflicts, resolvedRegionalConflictSkus]
+  );
+
+  const resolveRegionalConflict = useCallback(
+    (sku: string, productName?: string) => {
+      const normalized = sku.trim().toUpperCase();
+      setResolvedRegionalConflictSkus((prev) =>
+        prev.includes(normalized) ? prev : [...prev, normalized]
+      );
+      setWarehouseConflicts((prev) =>
+        prev.filter((c) => c.sku.trim().toUpperCase() !== normalized)
+      );
+
+      const matched = products.find((p) => p.sku.trim().toUpperCase() === normalized);
+      const operatorName = userProfile?.displayName || 'Warehouse Manager';
+      const reconcileEntry: SkuAuditLogEntry = {
+        id: _getUniqueId('AUD-REC'),
+        sku: matched?.sku || sku,
+        productId: matched?.id,
+        productName: productName || matched?.name || sku,
+        timestamp: new Date().toISOString(),
+        adjustmentValue: 0,
+        adjustmentType: 'reconciliation',
+        previousStock: matched?.stock ?? 0,
+        newStock: matched?.stock ?? 0,
+        operatorId: `OP-MGR (${operatorName})`,
+        operatorName,
+        reason: 'Regional Conflict Reconciled — Multi-Hub Sync',
+        warehouse: matched?.warehouse || 'Bay Area Hub (WH-01)',
+        notes: `Reconciled conflicting regional warehouse inventory ledgers for ${sku} via Warehouse Inventory Chart.`
+      };
+      setWarehouseAuditLogs((prev) => [reconcileEntry, ...prev]);
+
+      setChartDrilldownSku((prev) =>
+        prev && prev.trim().toUpperCase() === normalized ? null : prev
+      );
+
+      addAlert(
+        'success',
+        'Regional Inventory Reconciled',
+        `Synchronized cross-warehouse ledgers for ${sku}${productName ? ` (${productName})` : ''}.`
+      );
+    },
+    [products, userProfile, addAlert]
+  );
+
+  const toggleDiscrepancySkuSelection = useCallback((sku: string) => {
+    const normalized = sku.trim().toUpperCase();
+    if (!normalized) return;
+    setSelectedDiscrepancySkus((prev) =>
+      prev.includes(normalized)
+        ? prev.filter((item) => item !== normalized)
+        : [...prev, normalized]
+    );
+  }, []);
+
+  const openBatchReconcileForSkus = useCallback((skus?: string[]) => {
+    if (skus && skus.length > 0) {
+      const normalized = Array.from(
+        new Set(skus.map((s) => s.trim().toUpperCase()).filter(Boolean))
+      );
+      setSelectedDiscrepancySkus(normalized);
+    }
+    setAdminActiveTab('reconcile');
+    setIsAdminOpen(true);
+  }, []);
+
+  const batchClearAndReconcileDiscrepancies = useCallback(
+    async (
+      skus: string[],
+      auditNote: string
+    ): Promise<{
+      success: boolean;
+      reconciledCount: number;
+      skus: string[];
+      auditNote: string;
+      timestamp: string;
+    }> => {
+      const normalizedSkus = Array.from(
+        new Set(skus.map((s) => s.trim().toUpperCase()).filter(Boolean))
+      );
+      const cleanNote =
+        auditNote.trim() ||
+        'Bulk Clear & Reconcile verified across warehouse ledgers.';
+      const nowIso = new Date().toISOString();
+
+      if (normalizedSkus.length === 0) {
+        return {
+          success: false,
+          reconciledCount: 0,
+          skus: [],
+          auditNote: cleanNote,
+          timestamp: nowIso
+        };
+      }
+
+      const currentLogs = warehouseAuditLogsRef.current;
+      const latestTs = currentLogs.reduce((max, log) => {
+        const ts = new Date(log.timestamp).getTime();
+        return Number.isFinite(ts) && ts > max ? ts : max;
+      }, 0);
+      const baseMs = Math.max(Date.now(), latestTs + 1000);
+      const operatorName = userProfile?.displayName || 'Warehouse Manager';
+
+      const newEntries: SkuAuditLogEntry[] = normalizedSkus.map((normSku, idx) => {
+        const matched = products.find(
+          (p) => p.sku.trim().toUpperCase() === normSku
+        );
+        return {
+          id: _getUniqueId('AUD-BREC'),
+          sku: matched?.sku || normSku,
+          productId: matched?.id,
+          productName: matched?.name || normSku,
+          timestamp: new Date(baseMs + idx * 500).toISOString(),
+          adjustmentValue: 0,
+          adjustmentType: 'reconciliation',
+          previousStock: matched?.stock ?? 0,
+          newStock: matched?.stock ?? 0,
+          operatorId: `OP-MGR (${operatorName})`,
+          operatorName,
+          reason:
+            'Batch Clear & Reconcile — Auditor Clearance: Quarantine & Damaged Flags Cleared · Regional Conflict Reconciled',
+          warehouse: matched?.warehouse || 'Bay Area Hub (WH-01)',
+          notes: cleanNote
+        };
+      });
+
+      // Best-effort persistence to backend audit log endpoint
+      await Promise.allSettled(
+        newEntries.map((entry) =>
+          fetch('/api/inventory/audit-logs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sku: entry.sku,
+              productName: entry.productName,
+              adjustmentValue: 0,
+              adjustmentType: 'reconciliation',
+              previousStock: entry.previousStock,
+              newStock: entry.newStock,
+              operatorId: entry.operatorId,
+              operatorName: entry.operatorName,
+              reason: entry.reason,
+              warehouse: entry.warehouse,
+              notes: entry.notes
+            })
+          })
+        )
+      );
+
+      setWarehouseAuditLogs((prev) => {
+        const next = [...newEntries, ...prev];
+        warehouseAuditLogsRef.current = next;
+        return next;
+      });
+
+      setResolvedRegionalConflictSkus((prev) =>
+        Array.from(new Set([...prev, ...normalizedSkus]))
+      );
+      setReconciledDiscrepancySkus((prev) =>
+        Array.from(new Set([...prev, ...normalizedSkus]))
+      );
+      setWarehouseConflicts((prev) =>
+        prev.filter((c) => !normalizedSkus.includes(c.sku.trim().toUpperCase()))
+      );
+      setSelectedDiscrepancySkus((prev) =>
+        prev.filter((s) => !normalizedSkus.includes(s.trim().toUpperCase()))
+      );
+      setChartDrilldownSku((prev) =>
+        prev && normalizedSkus.includes(prev.trim().toUpperCase()) ? null : prev
+      );
+
+      addAlert(
+        'success',
+        'Batch Clear & Reconcile Complete',
+        `Cleared & reconciled ${normalizedSkus.length} SKU discrepanc${
+          normalizedSkus.length === 1 ? 'y' : 'ies'
+        } (${normalizedSkus.slice(0, 3).join(', ')}${
+          normalizedSkus.length > 3 ? ` +${normalizedSkus.length - 3}` : ''
+        }) with audit note.`
+      );
+
+      return {
+        success: true,
+        reconciledCount: normalizedSkus.length,
+        skus: newEntries.map((e) => e.sku),
+        auditNote: cleanNote,
+        timestamp: nowIso
+      };
+    },
+    [products, userProfile, addAlert]
+  );
 
   // Check and dispatch automated notifications for triggered price alerts
   const checkAndTriggerInventoryAlerts = useCallback((productId: string, updates: { price?: number, stock?: number }, prodName?: string, lowStockThreshold?: number) => {
@@ -2190,6 +2584,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         setIsSafeModeEnabled,
         warehouseAuditLogs,
         checkSkuSafety,
+        toggleSkuDamagedFlag,
+        refreshWarehouseAuditLogs,
+        clearSkuAuditFlags,
         customerDefaultWarehouse,
         setCustomerDefaultWarehouse,
         setOnlyWishlist,
@@ -2268,7 +2665,19 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         dismissWarehouseConflict,
         resolveWarehouseConflict,
         reportInventoryEditingSession,
-        simulateWarehouseConflict
+        simulateWarehouseConflict,
+        chartDrilldownSku,
+        setChartDrilldownSku,
+        drillDownToInventoryChart,
+        resolvedRegionalConflictSkus,
+        resolveRegionalConflict,
+        getSkuRegionalConflict,
+        selectedDiscrepancySkus,
+        setSelectedDiscrepancySkus,
+        toggleDiscrepancySkuSelection,
+        reconciledDiscrepancySkus,
+        openBatchReconcileForSkus,
+        batchClearAndReconcileDiscrepancies
       }}
     >
       {children}

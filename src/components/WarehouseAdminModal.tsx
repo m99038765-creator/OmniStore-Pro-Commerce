@@ -30,8 +30,10 @@ import {
   Check,
   Tag,
   FileText,
+  FileDown,
   Scale,
-  ShieldCheck
+  ShieldCheck,
+  ClipboardCheck
 } from 'lucide-react';
 import { useStore } from '../context/StoreContext';
 import { Product } from '../types';
@@ -47,6 +49,15 @@ import { WarehouseAiSkuSuggestions } from './WarehouseAiSkuSuggestions';
 import { ReservationConflictAlertModal } from './ReservationConflictAlertModal';
 import { AuditComplianceReportModal } from './AuditComplianceReportModal';
 import { StockVarianceMonitorModal } from './StockVarianceMonitorModal';
+import { WarehouseBatchReconcile } from './WarehouseBatchReconcile';
+import { InventoryIntegritySummaryModal } from './InventoryIntegritySummaryModal';
+import { getAllRegionalConflicts } from '../utils/inventoryConflicts';
+import { getChartSkuDiscrepancies } from '../utils/warehouseZoneDiscrepancies';
+import { computeInventoryIntegritySummary } from '../utils/inventoryIntegritySummary';
+import {
+  aggregateWeeklyComplianceAuditData,
+  downloadWeeklyComplianceAuditPdf
+} from '../utils/weeklyCompliancePdf';
 
 export const WarehouseAdminModal: React.FC = () => {
   const {
@@ -57,6 +68,7 @@ export const WarehouseAdminModal: React.FC = () => {
     adminSelectedProductIds,
     setAdminSelectedProductIds,
     products,
+    orders,
     metrics,
     restockProduct,
     simulateExternalPurchase,
@@ -76,7 +88,14 @@ export const WarehouseAdminModal: React.FC = () => {
     addAlert,
     isSafeModeEnabled,
     setIsSafeModeEnabled,
-    checkSkuSafety
+    checkSkuSafety,
+    warehouseAuditLogs,
+    warehouseConflicts,
+    resolvedRegionalConflictSkus,
+    reconciledDiscrepancySkus,
+    selectedDiscrepancySkus,
+    openBatchReconcileForSkus,
+    userProfile
   } = useStore();
 
   const [scannerProductId, setScannerProductId] = useState<string | null>(null);
@@ -92,7 +111,71 @@ export const WarehouseAdminModal: React.FC = () => {
   const [isBulkQrOpen, setIsBulkQrOpen] = useState(false);
   const [isAuditReportOpen, setIsAuditReportOpen] = useState(false);
   const [isVarianceMonitorOpen, setIsVarianceMonitorOpen] = useState(false);
+  const [isIntegritySummaryOpen, setIsIntegritySummaryOpen] = useState(false);
+  const [isGeneratingWeeklyPdf, setIsGeneratingWeeklyPdf] = useState(false);
   const [skuFilterSearch, setSkuFilterSearch] = useState('');
+
+  const integrityAnomalyCount = useMemo(
+    () =>
+      computeInventoryIntegritySummary(products, orders, warehouseAuditLogs)
+        .flaggedAnomalySkusCount,
+    [products, orders, warehouseAuditLogs]
+  );
+
+  const weeklyComplianceStats = useMemo(
+    () =>
+      aggregateWeeklyComplianceAuditData(
+        warehouseAuditLogs,
+        products,
+        userProfile?.displayName || 'Warehouse Admin'
+      ),
+    [warehouseAuditLogs, products, userProfile]
+  );
+
+  const activeChartDiscrepanciesCount = useMemo(() => {
+    const regionalConflicts = getAllRegionalConflicts(
+      products,
+      warehouseAuditLogs,
+      warehouseConflicts,
+      resolvedRegionalConflictSkus
+    );
+    return getChartSkuDiscrepancies(
+      products,
+      warehouseAuditLogs,
+      regionalConflicts,
+      reconciledDiscrepancySkus
+    ).length;
+  }, [
+    products,
+    warehouseAuditLogs,
+    warehouseConflicts,
+    resolvedRegionalConflictSkus,
+    reconciledDiscrepancySkus
+  ]);
+
+  const handleDownloadWeeklyCompliancePdf = () => {
+    if (isGeneratingWeeklyPdf) return;
+    setIsGeneratingWeeklyPdf(true);
+    try {
+      const summary = downloadWeeklyComplianceAuditPdf(
+        warehouseAuditLogs,
+        products,
+        userProfile?.displayName || 'Warehouse Admin'
+      );
+      const msg = `Weekly Compliance Audit Report PDF downloaded (${summary.reportId}): ${summary.totalEntries} entries in last 7d (${summary.quarantineCount} quarantine, ${summary.damageCount} damage, ${summary.manualAdjustmentCount} manual adjustments).`;
+      setActionSuccess(msg);
+      setTimeout(() => setActionSuccess(null), 5000);
+      addAlert('success', 'Weekly Compliance Audit PDF Ready', msg);
+    } catch {
+      addAlert(
+        'critical',
+        'PDF Generation Failed',
+        'Unable to compile the Weekly Compliance Audit Report PDF. Please try again.'
+      );
+    } finally {
+      setIsGeneratingWeeklyPdf(false);
+    }
+  };
   const [skuFilterCategory, setSkuFilterCategory] = useState('all');
   const [skuFilterWarehouse, setSkuFilterWarehouse] = useState('all');
 
@@ -369,12 +452,49 @@ export const WarehouseAdminModal: React.FC = () => {
               </div>
             </div>
 
-            <button
-              onClick={() => setIsAdminOpen(false)}
-              className="p-1.5 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
-            >
-              <X className="w-5 h-5" />
-            </button>
+            <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+              <button
+                type="button"
+                id="warehouse-inventory-integrity-summary-btn"
+                onClick={() => setIsIntegritySummaryOpen(true)}
+                title="Open 30-day Inventory Integrity Summary table highlighting stock decreases without a corresponding sales record"
+                className="px-3 py-1.5 rounded-xl bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/45 text-xs font-mono font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-xs"
+              >
+                <Activity className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                <span className="hidden md:inline">Inventory Integrity Summary</span>
+                <span className="md:hidden">Integrity (30d)</span>
+                {integrityAnomalyCount > 0 && (
+                  <span className="px-1.5 py-0.2 rounded-md text-[10px] font-bold bg-rose-500/25 text-rose-200 border border-rose-400/45">
+                    {integrityAnomalyCount} Flagged
+                  </span>
+                )}
+              </button>
+
+              <button
+                type="button"
+                id="warehouse-weekly-compliance-pdf-btn"
+                disabled={isGeneratingWeeklyPdf}
+                onClick={handleDownloadWeeklyCompliancePdf}
+                title={`Download Weekly Compliance Audit Report PDF — aggregates last 7 days (${weeklyComplianceStats.quarantineCount} quarantine, ${weeklyComplianceStats.damageCount} damage, ${weeklyComplianceStats.manualAdjustmentCount} manual adjustments)`}
+                className="px-3 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 disabled:opacity-60 text-emerald-300 border border-emerald-500/45 text-xs font-mono font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-xs"
+              >
+                <FileDown className={`w-3.5 h-3.5 text-emerald-400 shrink-0 ${isGeneratingWeeklyPdf ? 'animate-bounce' : ''}`} />
+                <span className="hidden sm:inline">
+                  {isGeneratingWeeklyPdf ? 'Generating PDF...' : 'Weekly Compliance Audit PDF'}
+                </span>
+                <span className="sm:hidden">7d Audit PDF</span>
+                <span className="px-1.5 py-0.2 rounded-md text-[10px] font-bold bg-emerald-500/25 text-emerald-200 border border-emerald-400/35">
+                  {weeklyComplianceStats.totalEntries} (7d)
+                </span>
+              </button>
+
+              <button
+                onClick={() => setIsAdminOpen(false)}
+                className="p-1.5 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
           </div>
 
           {/* Power User Keyboard Shortcuts Helper Bar */}
@@ -504,6 +624,32 @@ export const WarehouseAdminModal: React.FC = () => {
               </button>
 
               <button
+                id="warehouse-tab-reconcile-btn"
+                onClick={() => setAdminActiveTab('reconcile')}
+                className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-2 transition-all cursor-pointer ${
+                  adminActiveTab === 'reconcile'
+                    ? 'bg-orange-500/20 text-orange-200 border border-orange-500/55 shadow-sm font-bold'
+                    : 'text-neutral-400 hover:text-orange-200 hover:bg-neutral-900'
+                }`}
+              >
+                <ClipboardCheck className="w-3.5 h-3.5 text-orange-400" />
+                <span>Batch Reconcile</span>
+                {selectedDiscrepancySkus.length > 0 ? (
+                  <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-orange-500 text-neutral-950 font-bold">
+                    {selectedDiscrepancySkus.length} Selected
+                  </span>
+                ) : activeChartDiscrepanciesCount > 0 ? (
+                  <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-orange-500/25 text-orange-200 border border-orange-500/40 font-bold">
+                    {activeChartDiscrepanciesCount} Open
+                  </span>
+                ) : (
+                  <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/35">
+                    Clean
+                  </span>
+                )}
+              </button>
+
+              <button
                 id="warehouse-tab-scanner-btn"
                 onClick={() => setAdminActiveTab('scanner')}
                 className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-2 transition-all ${
@@ -610,6 +756,16 @@ export const WarehouseAdminModal: React.FC = () => {
                 setSelectedProductIds={setAdminSelectedProductIds}
                 onFinishedSuccess={(msg) => {
                   setActionSuccess(msg);
+                }}
+                onSwitchToInventory={() => setAdminActiveTab('inventory')}
+              />
+            </div>
+          ) : adminActiveTab === 'reconcile' ? (
+            <div className="flex-1 overflow-y-auto p-4 sm:p-5">
+              <WarehouseBatchReconcile
+                onFinishedSuccess={(msg) => {
+                  setActionSuccess(msg);
+                  setTimeout(() => setActionSuccess(null), 5000);
                 }}
                 onSwitchToInventory={() => setAdminActiveTab('inventory')}
               />
@@ -1534,6 +1690,15 @@ export const WarehouseAdminModal: React.FC = () => {
         isOpen={isVarianceMonitorOpen}
         onClose={() => setIsVarianceMonitorOpen(false)}
         products={products}
+      />
+
+      {/* 30-Day Inventory Integrity Summary Modal */}
+      <InventoryIntegritySummaryModal
+        isOpen={isIntegritySummaryOpen}
+        onClose={() => setIsIntegritySummaryOpen(false)}
+        onOpenAuditLog={handleOpenSkuAudit}
+        onOpenStockAdjust={handleOpenStockAdjust}
+        onSendToBatchReconcile={(skus) => openBatchReconcileForSkus(skus)}
       />
     </AnimatePresence>
   );

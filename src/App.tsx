@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useEffect, useRef, useCallback } from 'react';
 import { motion } from 'motion/react';
 import {
   ShieldCheck,
@@ -36,7 +36,11 @@ import {
   Tag,
   Clock,
   Scale,
-  Printer
+  Printer,
+  RefreshCw,
+  Pencil,
+  Plus,
+  Minus
 } from 'lucide-react';
 import { StoreProvider, useStore } from './context/StoreContext';
 import { LiveTickerBar } from './components/LiveTickerBar';
@@ -63,7 +67,7 @@ import { UserProfileModal } from './components/UserProfileModal';
 import { ScannerModal, extractSkuFromDecodedText } from './components/ScannerModal';
 import { VoiceDictationButton } from './components/VoiceDictationButton';
 import { REGIONAL_HUBS, calculateTransitEstimation } from './utils/transitCalculator';
-import { isAuditEntryQuarantineOrDamaged } from './utils/skuAuditSafety';
+import { isAuditEntryQuarantineOrDamaged, checkSkuAuditLogSafety } from './utils/skuAuditSafety';
 
 const StorefrontContent: React.FC = () => {
   const {
@@ -94,6 +98,7 @@ const StorefrontContent: React.FC = () => {
     isSafeModeEnabled,
     setIsSafeModeEnabled,
     checkSkuSafety,
+    refreshWarehouseAuditLogs,
     customerDefaultWarehouse,
     setCustomerDefaultWarehouse,
     showWarehouseTags,
@@ -104,7 +109,8 @@ const StorefrontContent: React.FC = () => {
     toggleCompareProduct,
     setIsCompareModalOpen,
     maxDeliveryDays,
-    setMaxDeliveryDays
+    setMaxDeliveryDays,
+    batchAdjustStock
   } = useStore();
 
   const [copiedSku, setCopiedSku] = useState<string | null>(null);
@@ -113,6 +119,68 @@ const StorefrontContent: React.FC = () => {
   const [isSkuScannerOpen, setIsSkuScannerOpen] = useState(false);
   const [safeModeAuditSku, setSafeModeAuditSku] = useState<string | null>(null);
   const [groupRelated, setGroupRelated] = useState(false);
+
+  // SKU Quick Lookup Chips Bar inline stock Quick-Edit state
+  const [quickEditChipSku, setQuickEditChipSku] = useState<string | null>(null);
+  const [quickEditChipStock, setQuickEditChipStock] = useState<string>('');
+  const [isSavingQuickEditChip, setIsSavingQuickEditChip] = useState<boolean>(false);
+  const [justUpdatedChipSku, setJustUpdatedChipSku] = useState<string | null>(null);
+
+  const handleOpenChipQuickEdit = (sku: string, currentStock: number) => {
+    setQuickEditChipSku(sku);
+    setQuickEditChipStock(String(currentStock));
+  };
+
+  const handleCancelChipQuickEdit = () => {
+    setQuickEditChipSku(null);
+    setQuickEditChipStock('');
+  };
+
+  const handleSaveChipQuickEdit = async (productId: string, sku: string, productName: string, oldStock: number) => {
+    const parsed = parseInt(quickEditChipStock, 10);
+    if (isNaN(parsed) || parsed < 0 || isSavingQuickEditChip) return;
+    if (parsed === oldStock) {
+      handleCancelChipQuickEdit();
+      return;
+    }
+
+    setIsSavingQuickEditChip(true);
+    try {
+      const res = await batchAdjustStock({
+        productIds: [productId],
+        adjustmentType: 'set',
+        quantity: parsed,
+        reason: 'Inline Quick-Edit via SKU Quick Lookup Chips Bar'
+      });
+      if (res.success) {
+        addAlert(
+          'success',
+          'Stock Updated (Quick-Edit)',
+          `Set ${sku} (${productName}) stock from ${oldStock} to ${parsed} units.`
+        );
+        setJustUpdatedChipSku(sku);
+        setTimeout(() => {
+          setJustUpdatedChipSku((prev) => (prev === sku ? null : prev));
+        }, 2000);
+      }
+    } finally {
+      setIsSavingQuickEditChip(false);
+      handleCancelChipQuickEdit();
+    }
+  };
+
+  // Safe Mode Intercept Auto-Retry state
+  const [isSafeModeAutoRetryEnabled, setIsSafeModeAutoRetryEnabled] = useState<boolean>(true);
+  const [autoRetryIntervalSec, setAutoRetryIntervalSec] = useState<number>(5);
+  const [autoRetryCountdown, setAutoRetryCountdown] = useState<number>(5);
+  const [isCheckingAuditLog, setIsCheckingAuditLog] = useState<boolean>(false);
+  const [autoRetryChecksCount, setAutoRetryChecksCount] = useState<number>(0);
+  const [lastAuditCheckTime, setLastAuditCheckTime] = useState<string | null>(null);
+  const [autoRetryRestoredNotice, setAutoRetryRestoredNotice] = useState<{
+    skus: string[];
+    restoredAt: string;
+  } | null>(null);
+  const prevSuppressedSkusRef = useRef<string[]>([]);
 
   // Handle successful barcode or QR code scan for SKU
   const handleSkuScanned = (scannedText: string) => {
@@ -350,6 +418,98 @@ const StorefrontContent: React.FC = () => {
       })
       .filter((item) => !item.safety.isSafe);
   }, [products, skuSearchQuery, isSafeModeEnabled, checkSkuSafety]);
+
+  // Execute an immediate audit-log re-check for currently suppressed SKUs
+  const runSafeModeAuditRecheck = useCallback(async () => {
+    if (!isSafeModeEnabled || safeModeSuppressedProducts.length === 0) return;
+    setIsCheckingAuditLog(true);
+    try {
+      const targetSkus = safeModeSuppressedProducts.map((item) => item.product.sku);
+      const latestLogs = await refreshWarehouseAuditLogs();
+      setAutoRetryChecksCount((prev) => prev + 1);
+      setLastAuditCheckTime(
+        new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      );
+
+      const newlyCleared = targetSkus.filter((sku) => checkSkuAuditLogSafety(sku, latestLogs).isSafe);
+      if (newlyCleared.length > 0) {
+        const restoredAt = new Date().toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit'
+        });
+        setAutoRetryRestoredNotice({ skus: newlyCleared, restoredAt });
+        addAlert(
+          'success',
+          'Auto-Retry: SKU Cleared & Restored',
+          `Audit flag cleared by auditor for ${newlyCleared.join(', ')}. Automatically displayed in catalog.`
+        );
+      }
+    } finally {
+      setIsCheckingAuditLog(false);
+      setAutoRetryCountdown(autoRetryIntervalSec);
+    }
+  }, [
+    isSafeModeEnabled,
+    safeModeSuppressedProducts,
+    refreshWarehouseAuditLogs,
+    autoRetryIntervalSec,
+    addAlert
+  ]);
+
+  // Detect when a previously suppressed SKU becomes clean in real-time (e.g., cleared in Audit Modal)
+  useEffect(() => {
+    const currentSuppressed = safeModeSuppressedProducts.map((item) => item.product.sku);
+    const prevSuppressed = prevSuppressedSkusRef.current;
+
+    if (isSafeModeEnabled && skuSearchQuery.trim() && prevSuppressed.length > 0) {
+      const clearedNow = prevSuppressed.filter(
+        (sku) => !currentSuppressed.includes(sku) && checkSkuSafety(sku).isSafe
+      );
+      if (clearedNow.length > 0) {
+        const restoredAt = new Date().toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit'
+        });
+        setAutoRetryRestoredNotice({ skus: clearedNow, restoredAt });
+      }
+    }
+
+    prevSuppressedSkusRef.current = currentSuppressed;
+  }, [safeModeSuppressedProducts, isSafeModeEnabled, skuSearchQuery, checkSkuSafety]);
+
+  // Reset restored notice when SKU search changes or clears
+  useEffect(() => {
+    setAutoRetryRestoredNotice(null);
+    setAutoRetryChecksCount(0);
+    setAutoRetryCountdown(autoRetryIntervalSec);
+  }, [skuSearchQuery, autoRetryIntervalSec]);
+
+  // Periodic Auto-Retry countdown timer while Safe Mode Intercept banner is active
+  useEffect(() => {
+    if (!isSafeModeEnabled || safeModeSuppressedProducts.length === 0 || !isSafeModeAutoRetryEnabled) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      setAutoRetryCountdown((prev) => {
+        if (prev <= 1) {
+          void runSafeModeAuditRecheck();
+          return autoRetryIntervalSec;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [
+    isSafeModeEnabled,
+    safeModeSuppressedProducts.length,
+    isSafeModeAutoRetryEnabled,
+    autoRetryIntervalSec,
+    runSafeModeAuditRecheck
+  ]);
 
   const exactSkuProduct = useMemo(() => {
     if (!skuSearchQuery.trim()) return null;
@@ -1510,39 +1670,222 @@ const StorefrontContent: React.FC = () => {
               <Barcode className="w-3.5 h-3.5 text-sky-400" />
               Warehouse SKUs:
             </span>
-            {availableSkus.map((sku, index) => {
+            {availableSkus.map((sku) => {
               const isSelected = skuSearchQuery.trim().toUpperCase() === sku.toUpperCase();
               const safety = isSafeModeEnabled ? checkSkuSafety(sku) : null;
               const isFlagged = safety && !safety.isSafe;
+              const matchedProduct = products.find(
+                (p) => p.sku.toUpperCase() === sku.toUpperCase()
+              );
+              const isCompared = matchedProduct
+                ? comparedProductIds.includes(matchedProduct.id)
+                : false;
+              const isEditingThisChip = quickEditChipSku === sku;
+              const wasJustUpdated = justUpdatedChipSku === sku;
 
               return (
-                <button
+                <div
                   key={sku}
-                  id={`sku-chip-${sku}`}
-                  onClick={() => setSkuSearchQuery(isSelected ? '' : sku)}
-                  title={
-                    isSelected
-                      ? `Clear SKU filter ${sku}`
+                  className={`inline-flex items-center rounded-lg border transition-all overflow-hidden ${
+                    isEditingThisChip
+                      ? 'bg-sky-950/70 border-sky-400 shadow-md ring-1 ring-sky-400/50'
+                      : wasJustUpdated
+                      ? 'bg-emerald-950/60 border-emerald-400 shadow-xs ring-1 ring-emerald-500/40'
+                      : isSelected
+                      ? 'bg-sky-500/20 border-sky-400/80 shadow-xs ring-1 ring-sky-500/30'
+                      : isCompared
+                      ? 'bg-emerald-950/40 border-emerald-500/50 shadow-xs'
                       : isFlagged
-                      ? `[SAFE MODE] Flagged in audit log: ${safety?.statusLabel || 'Flagged'}`
-                      : `Filter catalog specifically for SKU ${sku}`
-                  }
-                  className={`font-mono text-[10px] px-2 py-0.5 rounded-lg border transition-all cursor-pointer flex items-center gap-1 ${
-                    isSelected
-                      ? 'bg-sky-500/25 text-sky-300 border-sky-400/80 font-bold shadow-xs ring-1 ring-sky-500/30'
-                      : isFlagged
-                      ? 'bg-amber-950/40 text-amber-300 border-amber-500/40 hover:border-amber-400/70 hover:bg-amber-900/40'
-                      : 'bg-neutral-900 hover:bg-neutral-800 text-neutral-400 hover:text-neutral-200 border-neutral-800 hover:border-neutral-700'
+                      ? 'bg-amber-950/40 border-amber-500/40 hover:border-amber-400/70'
+                      : 'bg-neutral-900 border-neutral-800 hover:border-neutral-700'
                   }`}
                 >
-                  {isFlagged && <ShieldAlert className="w-2.5 h-2.5 text-amber-400 shrink-0" />}
-                  <span>{sku}</span>
-                </button>
+                  <button
+                    type="button"
+                    id={`sku-chip-${sku}`}
+                    onClick={() => setSkuSearchQuery(isSelected ? '' : sku)}
+                    title={
+                      isSelected
+                        ? `Clear SKU filter ${sku}`
+                        : isFlagged
+                        ? `[SAFE MODE] Flagged in audit log: ${safety?.statusLabel || 'Flagged'}`
+                        : `Filter catalog specifically for SKU ${sku}`
+                    }
+                    className={`font-mono text-[10px] px-2 py-0.5 transition-colors cursor-pointer flex items-center gap-1 ${
+                      isSelected || isEditingThisChip
+                        ? 'text-sky-300 font-bold'
+                        : isFlagged
+                        ? 'text-amber-300 hover:bg-amber-900/40'
+                        : 'text-neutral-300 hover:text-white hover:bg-neutral-800/80'
+                    }`}
+                  >
+                    {isFlagged && <ShieldAlert className="w-2.5 h-2.5 text-amber-400 shrink-0" />}
+                    <span>{sku}</span>
+                    {matchedProduct && !isEditingThisChip && (
+                      <span
+                        className={`text-[9px] px-1 rounded ${
+                          wasJustUpdated
+                            ? 'bg-emerald-500/25 text-emerald-300 font-bold'
+                            : matchedProduct.stock <= matchedProduct.lowStockThreshold
+                            ? 'text-amber-400'
+                            : 'text-neutral-500'
+                        }`}
+                        title={`Current stock: ${matchedProduct.stock} units`}
+                      >
+                        {wasJustUpdated ? `✓${matchedProduct.stock}` : `(${matchedProduct.stock})`}
+                      </span>
+                    )}
+                  </button>
+
+                  {matchedProduct && isEditingThisChip ? (
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        void handleSaveChipQuickEdit(
+                          matchedProduct.id,
+                          sku,
+                          matchedProduct.name,
+                          matchedProduct.stock
+                        );
+                      }}
+                      onClick={(e) => e.stopPropagation()}
+                      className="inline-flex items-center gap-0.5 px-1.5 py-0.5 border-l border-sky-500/40 bg-neutral-950/90"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const curr = parseInt(quickEditChipStock, 10);
+                          setQuickEditChipStock(String(Math.max(0, (isNaN(curr) ? matchedProduct.stock : curr) - 1)));
+                        }}
+                        className="p-0.5 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white transition-colors cursor-pointer"
+                        title="Decrease stock by 1"
+                        aria-label={`Decrease stock for ${sku}`}
+                      >
+                        <Minus className="w-2.5 h-2.5" />
+                      </button>
+
+                      <input
+                        id={`sku-chip-quick-edit-input-${sku}`}
+                        type="number"
+                        min={0}
+                        step={1}
+                        autoFocus
+                        value={quickEditChipStock}
+                        onChange={(e) => setQuickEditChipStock(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Escape') {
+                            e.stopPropagation();
+                            handleCancelChipQuickEdit();
+                          }
+                        }}
+                        aria-label={`Set stock count for ${sku}`}
+                        className="w-12 px-1 py-0.2 bg-neutral-900 border border-sky-500/60 rounded text-center font-mono text-[10px] font-bold text-white focus:outline-none focus:ring-1 focus:ring-sky-400"
+                      />
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const curr = parseInt(quickEditChipStock, 10);
+                          setQuickEditChipStock(String((isNaN(curr) ? matchedProduct.stock : curr) + 1));
+                        }}
+                        className="p-0.5 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white transition-colors cursor-pointer"
+                        title="Increase stock by 1"
+                        aria-label={`Increase stock for ${sku}`}
+                      >
+                        <Plus className="w-2.5 h-2.5" />
+                      </button>
+
+                      <button
+                        type="submit"
+                        id={`sku-chip-quick-edit-save-${sku}`}
+                        disabled={isSavingQuickEditChip}
+                        className="ml-0.5 px-1.5 py-0.5 rounded bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-neutral-950 font-mono text-[9px] font-bold inline-flex items-center gap-0.5 transition-colors cursor-pointer"
+                        title="Save new stock count"
+                        aria-label={`Save stock count for ${sku}`}
+                      >
+                        <Check className="w-2.5 h-2.5 stroke-[2.5]" />
+                        <span>Save</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        id={`sku-chip-quick-edit-cancel-${sku}`}
+                        onClick={handleCancelChipQuickEdit}
+                        className="p-0.5 rounded hover:bg-neutral-800 text-neutral-400 hover:text-white transition-colors cursor-pointer"
+                        title="Cancel inline edit"
+                        aria-label={`Cancel stock edit for ${sku}`}
+                      >
+                        <X className="w-2.5 h-2.5" />
+                      </button>
+                    </form>
+                  ) : (
+                    matchedProduct && (
+                      <>
+                        <button
+                          type="button"
+                          id={`sku-chip-quick-edit-${sku}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleOpenChipQuickEdit(sku, matchedProduct.stock);
+                          }}
+                          title={`Quick-Edit stock count for ${sku} (Current: ${matchedProduct.stock} units)`}
+                          aria-label={`Quick-Edit stock for ${sku}`}
+                          className="font-mono text-[9px] px-1.5 py-0.5 border-l border-neutral-800/90 bg-neutral-950/60 hover:bg-sky-500/20 text-neutral-400 hover:text-sky-300 transition-all cursor-pointer flex items-center gap-1"
+                        >
+                          <Pencil className="w-2.5 h-2.5 shrink-0" />
+                          <span>Quick-Edit</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          id={`sku-chip-compare-${sku}`}
+                          aria-pressed={isCompared}
+                          aria-label={
+                            isCompared
+                              ? `Remove ${sku} from comparison matrix`
+                              : `Add ${sku} to comparison matrix`
+                          }
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleCompareProduct(matchedProduct.id);
+                          }}
+                          title={
+                            isCompared
+                              ? `Remove ${sku} (${matchedProduct.name}) from comparison matrix`
+                              : `Add ${sku} (${matchedProduct.name}) to comparison matrix`
+                          }
+                          className={`font-mono text-[9px] px-1.5 py-0.5 border-l transition-all cursor-pointer flex items-center gap-1 ${
+                            isCompared
+                              ? 'bg-emerald-500/25 text-emerald-300 border-emerald-500/40 font-bold hover:bg-emerald-500/35'
+                              : 'bg-neutral-950/60 hover:bg-emerald-500/15 text-neutral-400 hover:text-emerald-300 border-neutral-800/90'
+                          }`}
+                        >
+                          <Scale className="w-2.5 h-2.5 shrink-0" />
+                          <span>{isCompared ? 'Compared' : 'Compare'}</span>
+                        </button>
+                      </>
+                    )
+                  )}
+                </div>
               );
             })}
           </div>
 
           <div className="flex items-center gap-3 ml-auto">
+            {comparedProductIds.length > 0 && (
+              <button
+                type="button"
+                id="sku-chips-bar-open-compare-btn"
+                onClick={() => setIsCompareModalOpen(true)}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 text-emerald-300 text-[11px] font-mono font-semibold transition-colors cursor-pointer"
+                title="Open side-by-side comparison matrix"
+              >
+                <Scale className="w-3 h-3 text-emerald-400" />
+                <span>Compare ({comparedProductIds.length})</span>
+              </button>
+            )}
+
             {onlyLowStock && (
               <span
                 id="active-low-stock-filter-chip"
@@ -1683,6 +2026,112 @@ const StorefrontContent: React.FC = () => {
                       )}
                     </div>
                   )}
+
+                  {/* Auto-Retry Audit Log Monitor Strip */}
+                  <div
+                    id="safe-mode-auto-retry-panel"
+                    className="mt-3 p-3 rounded-xl bg-neutral-950/80 border border-amber-500/35 flex flex-wrap items-center justify-between gap-2.5 text-xs"
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <button
+                        type="button"
+                        id="safe-mode-auto-retry-toggle-btn"
+                        aria-pressed={isSafeModeAutoRetryEnabled}
+                        onClick={() => {
+                          setIsSafeModeAutoRetryEnabled((prev) => {
+                            const next = !prev;
+                            if (next) setAutoRetryCountdown(autoRetryIntervalSec);
+                            return next;
+                          });
+                        }}
+                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-mono text-[11px] font-bold border transition-all cursor-pointer shrink-0 ${
+                          isSafeModeAutoRetryEnabled
+                            ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50 hover:bg-emerald-500/30'
+                            : 'bg-neutral-900 text-neutral-300 border-neutral-700 hover:border-amber-500/50 hover:text-white'
+                        }`}
+                        title={
+                          isSafeModeAutoRetryEnabled
+                            ? 'Pause periodic audit-log re-checks'
+                            : 'Enable automatic periodic re-checks for auditor clearance'
+                        }
+                      >
+                        <RefreshCw
+                          className={`w-3.5 h-3.5 ${
+                            isCheckingAuditLog
+                              ? 'animate-spin text-sky-400'
+                              : isSafeModeAutoRetryEnabled
+                              ? 'text-emerald-400'
+                              : 'text-neutral-400'
+                          }`}
+                        />
+                        <span>Auto-Retry: {isSafeModeAutoRetryEnabled ? 'ON' : 'OFF'}</span>
+                      </button>
+
+                      <div className="text-[11px] font-mono text-neutral-300 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                        {isCheckingAuditLog ? (
+                          <span className="text-sky-300 font-semibold">
+                            Re-checking warehouse audit log...
+                          </span>
+                        ) : isSafeModeAutoRetryEnabled ? (
+                          <span>
+                            Next audit check in{' '}
+                            <strong className="text-amber-300">{autoRetryCountdown}s</strong>
+                            {' — '}auto-displays SKU once cleared
+                          </span>
+                        ) : (
+                          <span className="text-neutral-400">
+                            Auto-Retry paused. Enable to watch for auditor clearance.
+                          </span>
+                        )}
+                        {autoRetryChecksCount > 0 && (
+                          <span className="text-[10px] text-neutral-500">
+                            (Checks: {autoRetryChecksCount}
+                            {lastAuditCheckTime ? ` · Last: ${lastAuditCheckTime}` : ''})
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <div
+                        className="inline-flex items-center rounded-lg bg-neutral-900 border border-neutral-800 p-0.5 font-mono text-[10px]"
+                        role="group"
+                        aria-label="Auto-Retry polling interval"
+                      >
+                        {[5, 10, 30].map((sec) => (
+                          <button
+                            key={sec}
+                            type="button"
+                            id={`safe-mode-retry-interval-${sec}s`}
+                            onClick={() => {
+                              setAutoRetryIntervalSec(sec);
+                              setAutoRetryCountdown(sec);
+                            }}
+                            className={`px-1.5 py-0.5 rounded-md transition-colors cursor-pointer ${
+                              autoRetryIntervalSec === sec
+                                ? 'bg-amber-500/25 text-amber-200 font-bold'
+                                : 'text-neutral-400 hover:text-neutral-200'
+                            }`}
+                            title={`Re-check audit log every ${sec} seconds`}
+                          >
+                            {sec}s
+                          </button>
+                        ))}
+                      </div>
+
+                      <button
+                        type="button"
+                        id="safe-mode-check-now-btn"
+                        disabled={isCheckingAuditLog}
+                        onClick={() => void runSafeModeAuditRecheck()}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 disabled:opacity-50 text-sky-300 border border-sky-500/40 font-mono text-[10px] font-semibold transition-all cursor-pointer"
+                        title="Immediately re-check the warehouse audit log for flag clearance"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${isCheckingAuditLog ? 'animate-spin' : ''}`} />
+                        <span>Check Now</span>
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -1724,6 +2173,32 @@ const StorefrontContent: React.FC = () => {
                 </button>
               </div>
             </div>
+          </div>
+        )}
+
+        {/* Auto-Retry Cleared & Automatically Displayed Confirmation Banner */}
+        {isSafeModeEnabled && autoRetryRestoredNotice && safeModeSuppressedProducts.length === 0 && (
+          <div
+            id="sku-safe-mode-auto-restored-banner"
+            className="mb-4 px-4 py-3 rounded-xl bg-emerald-950/30 border border-emerald-500/60 text-emerald-200 text-xs flex flex-wrap items-center justify-between gap-3 shadow-md animate-in fade-in"
+            role="status"
+          >
+            <div className="flex items-center gap-2.5">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span>
+                <strong className="text-white">Auto-Retry Cleared:</strong> Auditor clearance verified for{' '}
+                <strong className="font-mono text-emerald-300">{autoRetryRestoredNotice.skus.join(', ')}</strong> at{' '}
+                <span className="font-mono text-neutral-300">{autoRetryRestoredNotice.restoredAt}</span> — item is now displayed below.
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setAutoRetryRestoredNotice(null)}
+              className="p-1 rounded-lg hover:bg-emerald-500/20 text-emerald-300 hover:text-white transition-colors cursor-pointer"
+              aria-label="Dismiss restoration notice"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
           </div>
         )}
 

@@ -39,6 +39,7 @@ import { SkuAuditLogModal } from './SkuAuditLogModal';
 import { TransitEstimationBadge } from './TransitEstimationBadge';
 import { QuickShipIndicator } from './QuickShipIndicator';
 import { ProductStockVelocityChart } from './ProductStockVelocityChart';
+import { ReorderSuggestionBadge } from './ReorderSuggestionBadge';
 
 export const ProductDetailModal: React.FC = () => {
   const {
@@ -417,7 +418,7 @@ export const ProductDetailModal: React.FC = () => {
                   {product.description}
                 </p>
 
-                {/* Logistics & Delivery Intelligence: Quick Ship Readiness & Transit Estimation */}
+                {/* Logistics & Delivery Intelligence: Quick Ship Readiness, Transit Estimation & Reorder Suggestion */}
                 <div className="mt-3.5 flex flex-wrap items-center gap-2">
                   <QuickShipIndicator
                     product={product}
@@ -427,6 +428,7 @@ export const ProductDetailModal: React.FC = () => {
                     product={product}
                     size="md"
                   />
+                  <ReorderSuggestionBadge product={product} />
                 </div>
 
                 {/* Price Display */}

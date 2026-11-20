@@ -25,6 +25,7 @@ import {
 import { Product, SkuAuditLogEntry } from '../types';
 import { getAuditLogsForSku } from '../data/initialAuditLogs';
 import { AuditLogExportModal } from './AuditLogExportModal';
+import { useStore } from '../context/StoreContext';
 
 interface SkuAuditLogModalProps {
   product?: Product | null;
@@ -46,14 +47,33 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
   const currentStock = product?.stock ?? 0;
   const warehouse = product?.warehouse || 'Central Logistics Hub (WH-01)';
 
+  const { warehouseAuditLogs, checkSkuSafety, clearSkuAuditFlags } = useStore();
   const [logs, setLogs] = useState<SkuAuditLogEntry[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isClearingFlag, setIsClearingFlag] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [searchFilter, setSearchFilter] = useState<string>('');
   const [typeFilter, setTypeFilter] = useState<'all' | 'positive' | 'negative' | 'cycle_count' | 'last_8h'>('all');
   const [copiedSku, setCopiedSku] = useState(false);
   const [copiedCsv, setCopiedCsv] = useState(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+
+  const skuSafety = useMemo(() => checkSkuSafety(activeSku), [activeSku, checkSkuSafety]);
+
+  const mergeWithStoreLogs = (fetchedLogs: SkuAuditLogEntry[]): SkuAuditLogEntry[] => {
+    const cleanActive = activeSku.toUpperCase().replace(/[-\s_]/g, '');
+    const matchingStoreLogs = warehouseAuditLogs.filter(
+      l =>
+        l.sku.toUpperCase() === activeSku.toUpperCase() ||
+        l.sku.toUpperCase().replace(/[-\s_]/g, '') === cleanActive
+    );
+    const byId = new Map<string, SkuAuditLogEntry>();
+    for (const l of fetchedLogs) byId.set(l.id, l);
+    for (const l of matchingStoreLogs) byId.set(l.id, l);
+    return Array.from(byId.values()).sort(
+      (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+    );
+  };
 
   // Fetch audit logs from server API or local fallback
   const fetchAuditLogs = async () => {
@@ -66,18 +86,18 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data.logs)) {
-          setLogs(data.logs);
+          setLogs(mergeWithStoreLogs(data.logs));
           setIsLoading(false);
           return;
         }
       }
       // Fallback if API returns empty or non-200
       const fallbackLogs = getAuditLogsForSku(activeSku, currentStock, productName);
-      setLogs(fallbackLogs);
+      setLogs(mergeWithStoreLogs(fallbackLogs));
     } catch (err: any) {
       // Local fallback on fetch failure (offline / sandboxed)
       const fallbackLogs = getAuditLogsForSku(activeSku, currentStock, productName);
-      setLogs(fallbackLogs);
+      setLogs(mergeWithStoreLogs(fallbackLogs));
     } finally {
       setIsLoading(false);
     }
@@ -87,7 +107,14 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
     if (isOpen && activeSku) {
       fetchAuditLogs();
     }
-  }, [isOpen, activeSku]);
+  }, [isOpen, activeSku, warehouseAuditLogs]);
+
+  const handleAuditorClearFlag = async () => {
+    if (!activeSku || isClearingFlag) return;
+    setIsClearingFlag(true);
+    await clearSkuAuditFlags(activeSku);
+    setIsClearingFlag(false);
+  };
 
   // Handle escape key
   useEffect(() => {
@@ -236,6 +263,19 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
           </div>
 
           <div className="flex items-center gap-1.5">
+            {!skuSafety.isSafe && (
+              <button
+                type="button"
+                id="auditor-clear-flag-btn"
+                onClick={handleAuditorClearFlag}
+                disabled={isClearingFlag}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-neutral-950 font-bold text-xs transition-all cursor-pointer shadow-xs"
+                title={`Clear active ${skuSafety.statusLabel} flag as QA Auditor`}
+              >
+                <ShieldCheck className="w-3.5 h-3.5" />
+                <span>{isClearingFlag ? 'Clearing...' : 'Clear Audit Flag'}</span>
+              </button>
+            )}
             <button
               id="refresh-audit-log-btn"
               type="button"

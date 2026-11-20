@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Navigation, Star, ShoppingBag, Eye, ShieldAlert, Check, MapPin, Sparkles, Scale, Heart, QrCode, BellRing, Zap, Barcode, AlertTriangle, CheckSquare, Square, Lock, Tag, Network, Sliders, Truck } from 'lucide-react';
+import { Navigation, Star, ShoppingBag, Eye, ShieldAlert, Check, MapPin, Sparkles, Scale, Heart, QrCode, BellRing, Zap, Barcode, AlertTriangle, CheckSquare, Square, Lock, Tag, Network, Sliders, Truck, MoreVertical, Flag, GitCompareArrows, BarChart3 } from 'lucide-react';
 import { Product } from '../types';
 import { getDistanceToWarehouse, MOCK_USER_LOCATION } from '../utils/distance';
 import { useStore } from '../context/StoreContext';
@@ -35,12 +35,42 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
     tagColorMap,
     openAdminForProduct,
     adminSelectedProductIds,
-    customerDefaultWarehouse
+    customerDefaultWarehouse,
+    checkSkuSafety,
+    toggleSkuDamagedFlag,
+    getSkuRegionalConflict,
+    drillDownToInventoryChart
   } = useStore();
   const itemReserved = isReserved(product.id);
   const [justAdded, setJustAdded] = useState(false);
   const [justQuickBought, setJustQuickBought] = useState(false);
   const [isReallocateOpen, setIsReallocateOpen] = useState(false);
+  const [isOverflowOpen, setIsOverflowOpen] = useState(false);
+  const overflowMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!isOverflowOpen) return;
+    const handleClickOutside = (event: MouseEvent) => {
+      if (overflowMenuRef.current && !overflowMenuRef.current.contains(event.target as Node)) {
+        setIsOverflowOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsOverflowOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isOverflowOpen]);
+
+  const skuSafety = checkSkuSafety(product.sku);
+  const isDamaged = skuSafety.flagType === 'damaged' || skuSafety.flagType === 'both';
+  const regionalConflict = getSkuRegionalConflict(product);
 
   const isSelected = selectedCatalogProductIds.includes(product.id);
   const isOutOfStock = product.stock <= 0;
@@ -92,11 +122,17 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
       id={`product-card-${product.id}`}
       whileHover={{ scale: 1.02, y: -4 }}
       transition={{ duration: 0.2, ease: 'easeOut' }}
-      className={`group relative flex flex-col bg-neutral-900/60 hover:bg-neutral-900 rounded-2xl overflow-hidden shadow-sm hover:shadow-2xl hover:shadow-black/60 ${
+      className={`group relative flex flex-col bg-neutral-900/60 hover:bg-neutral-900 rounded-2xl shadow-sm hover:shadow-2xl hover:shadow-black/60 ${
+        isOverflowOpen ? 'z-30' : ''
+      } ${
         isSelected
           ? 'border-2 border-sky-400 ring-2 ring-sky-500/40 shadow-lg shadow-sky-950/40 bg-sky-950/20'
           : isSkuMatched
           ? 'border-2 border-sky-500 ring-2 ring-sky-500/30 shadow-sky-500/10'
+          : isDamaged
+          ? 'border-2 border-rose-500/75 ring-1 ring-rose-500/30 shadow-rose-950/30'
+          : regionalConflict
+          ? 'border-2 border-orange-500/75 ring-1 ring-orange-500/30 shadow-orange-950/30'
           : isCompared
           ? 'border-2 border-emerald-500/80 ring-1 ring-emerald-500/30'
           : 'border border-neutral-800/80 hover:border-neutral-700/80'
@@ -104,16 +140,18 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
     >
       {/* Visual Media Canvas */}
       <div
-        className="relative w-full aspect-[4/3] bg-neutral-950 overflow-hidden cursor-pointer"
+        className="relative w-full aspect-[4/3] bg-neutral-950 rounded-t-2xl cursor-pointer"
         onClick={() => setQuickViewProduct(product)}
       >
-        <img
-          src={product.images[0]}
-          alt={product.name}
-          referrerPolicy="no-referrer"
-          className="w-full h-full object-cover object-center group-hover:scale-105 transition-transform duration-500"
-          loading="lazy"
-        />
+        <div className="w-full h-full overflow-hidden rounded-t-2xl">
+          <img
+            src={product.images[0]}
+            alt={product.name}
+            referrerPolicy="no-referrer"
+            className="w-full h-full object-cover object-center group-hover:scale-105 transition-transform duration-500"
+            loading="lazy"
+          />
+        </div>
 
         {/* Live Real-time Inventory Tag & Multi-select Checkbox */}
         <div className="absolute top-3 left-3 flex items-start gap-2 z-20">
@@ -163,6 +201,36 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
               {product.stock} In Stock
             </span>
+          )}
+
+          {isDamaged && (
+            <span
+              id={`damaged-status-badge-${product.id}`}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-mono font-bold uppercase tracking-wider bg-rose-950/95 text-rose-300 border border-rose-500/70 shadow-lg shadow-rose-950/60 backdrop-blur-md w-fit"
+              title="Flagged as Damaged in warehouse audit log — toggle via card overflow menu"
+            >
+              <ShieldAlert className="w-3 h-3 text-rose-400 shrink-0" />
+              <span>Damaged</span>
+            </span>
+          )}
+
+          {regionalConflict && (
+            <button
+              type="button"
+              id={`inventory-conflict-badge-${product.id}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                drillDownToInventoryChart(product.sku);
+              }}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[10px] font-mono font-bold tracking-wide bg-orange-950/95 hover:bg-orange-900/95 text-orange-200 border border-orange-500/80 shadow-lg shadow-orange-950/60 backdrop-blur-md w-fit cursor-pointer transition-all hover:scale-[1.03] active:scale-95 group/conflict"
+              title={`Inventory Conflict (${regionalConflict.delta >= 0 ? `+${regionalConflict.delta}` : regionalConflict.delta} units across hubs): ${regionalConflict.reason} Click to drill down into Warehouse Inventory Chart.`}
+              aria-label={`Inventory Conflict detected for ${product.sku}. Open Warehouse Inventory Chart drill-down.`}
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-orange-400 animate-ping shrink-0" />
+              <GitCompareArrows className="w-3 h-3 text-orange-400 shrink-0" />
+              <span>Inventory Conflict</span>
+              <BarChart3 className="w-2.5 h-2.5 text-orange-300 opacity-80 group-hover/conflict:translate-x-0.5 transition-transform shrink-0" />
+            </button>
           )}
 
           {product.isRelatedCluster && (
@@ -311,6 +379,170 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
           >
             <Sliders className="w-3.5 h-3.5" />
           </button>
+
+          {/* Product Card Overflow Menu */}
+          <div ref={overflowMenuRef} className="relative" onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              id={`product-card-overflow-btn-${product.id}`}
+              aria-haspopup="menu"
+              aria-expanded={isOverflowOpen}
+              aria-label={`More actions for ${product.name}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                setIsOverflowOpen(prev => !prev);
+              }}
+              className={`relative p-2 rounded-xl text-xs transition-all backdrop-blur-md flex items-center justify-center cursor-pointer ${
+                isOverflowOpen
+                  ? 'bg-neutral-800 border border-sky-400/70 text-white shadow-lg opacity-100'
+                  : isDamaged
+                  ? 'bg-rose-950/90 hover:bg-rose-900/90 border border-rose-500/70 text-rose-300 opacity-100 shadow-md'
+                  : 'bg-neutral-900/85 hover:bg-neutral-800 border border-neutral-700/60 text-neutral-200 hover:text-white opacity-95'
+              }`}
+              title="More card actions & Quick Flag"
+            >
+              <MoreVertical className="w-3.5 h-3.5" />
+              {isDamaged && (
+                <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-rose-500 ring-2 ring-neutral-950" />
+              )}
+            </button>
+
+            <AnimatePresence>
+              {isOverflowOpen && (
+                <motion.div
+                  id={`product-card-overflow-menu-${product.id}`}
+                  role="menu"
+                  initial={{ opacity: 0, scale: 0.95, y: -4 }}
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  exit={{ opacity: 0, scale: 0.95, y: -4 }}
+                  transition={{ duration: 0.14 }}
+                  className="absolute right-0 top-full mt-1.5 w-56 rounded-xl bg-neutral-950/98 border border-neutral-700/90 shadow-2xl shadow-black/80 backdrop-blur-xl py-1.5 z-40"
+                >
+                  <div className="px-3 py-1 border-b border-neutral-800/80 flex items-center justify-between">
+                    <span className="text-[10px] font-mono uppercase tracking-wider text-neutral-400">
+                      Quick Actions
+                    </span>
+                    <span className="text-[10px] font-mono text-neutral-500">{product.sku}</span>
+                  </div>
+
+                  {/* Quick Flag: Toggle Damaged Status */}
+                  <button
+                    type="button"
+                    role="menuitem"
+                    id={`quick-flag-damaged-btn-${product.id}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleSkuDamagedFlag(product);
+                      setIsOverflowOpen(false);
+                    }}
+                    className={`w-full px-3 py-2 text-left flex items-start gap-2.5 transition-colors cursor-pointer ${
+                      isDamaged
+                        ? 'bg-rose-500/15 hover:bg-rose-500/25 text-rose-200'
+                        : 'hover:bg-rose-500/15 text-neutral-200 hover:text-rose-200'
+                    }`}
+                  >
+                    <Flag
+                      className={`w-3.5 h-3.5 mt-0.5 shrink-0 ${
+                        isDamaged ? 'text-rose-400 fill-rose-500/40' : 'text-rose-400'
+                      }`}
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-1.5">
+                        <span className="text-xs font-semibold">
+                          {isDamaged ? 'Quick Flag: Clear Damaged' : 'Quick Flag: Mark Damaged'}
+                        </span>
+                        {isDamaged && (
+                          <span className="text-[9px] font-mono uppercase px-1.5 py-0.5 rounded bg-rose-500/25 text-rose-300 border border-rose-500/40 font-bold">
+                            Active
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[10px] text-neutral-400 mt-0.5 leading-snug">
+                        {isDamaged
+                          ? 'Remove Damaged audit flag & restore active status'
+                          : 'Immediately flag SKU as Damaged without opening Admin'}
+                      </p>
+                    </div>
+                  </button>
+
+                  <div className="my-1 border-t border-neutral-800/80" />
+
+                  {regionalConflict && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      id={`overflow-conflict-drilldown-btn-${product.id}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setIsOverflowOpen(false);
+                        drillDownToInventoryChart(product.sku);
+                      }}
+                      className="w-full px-3 py-1.5 text-left text-xs text-orange-300 hover:text-orange-200 hover:bg-orange-500/15 flex items-center gap-2 transition-colors cursor-pointer font-medium"
+                    >
+                      <GitCompareArrows className="w-3.5 h-3.5 text-orange-400 shrink-0" />
+                      <span>Drill Down: Inventory Conflict</span>
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setIsOverflowOpen(false);
+                      openAdminForProduct(product);
+                    }}
+                    className="w-full px-3 py-1.5 text-left text-xs text-neutral-300 hover:text-white hover:bg-neutral-800/80 flex items-center gap-2 transition-colors cursor-pointer"
+                  >
+                    <Sliders className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                    <span>Open in Warehouse Admin</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setIsOverflowOpen(false);
+                      setIsReallocateOpen(true);
+                    }}
+                    className="w-full px-3 py-1.5 text-left text-xs text-neutral-300 hover:text-white hover:bg-neutral-800/80 flex items-center gap-2 transition-colors cursor-pointer"
+                  >
+                    <Truck className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                    <span>Quick Reallocate Stock</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleCompareProduct(product.id);
+                      setIsOverflowOpen(false);
+                    }}
+                    className="w-full px-3 py-1.5 text-left text-xs text-neutral-300 hover:text-white hover:bg-neutral-800/80 flex items-center gap-2 transition-colors cursor-pointer"
+                  >
+                    <Scale className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    <span>{isCompared ? 'Remove from Compare' : 'Add to Compare'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setIsOverflowOpen(false);
+                      setQrCodeProduct(product);
+                    }}
+                    className="w-full px-3 py-1.5 text-left text-xs text-neutral-300 hover:text-white hover:bg-neutral-800/80 flex items-center gap-2 transition-colors cursor-pointer"
+                  >
+                    <QrCode className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    <span>View SKU QR Code</span>
+                  </button>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
         </div>
 
         {/* Warehouse Tag */}

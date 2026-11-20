@@ -2,6 +2,45 @@ import { SkuAuditLogEntry, SkuSafetyCheckResult } from '../types';
 import { INITIAL_SKU_AUDIT_LOGS } from '../data/initialAuditLogs';
 
 /**
+ * Checks whether an audit log entry explicitly clears a previously applied Damaged flag.
+ */
+export function isAuditEntryDamagedClearance(entry: SkuAuditLogEntry): boolean {
+  const reasonText = (entry.reason || '').toLowerCase();
+  const notesText = (entry.notes || '').toLowerCase();
+  const combined = `${reasonText} ${notesText}`;
+
+  return (
+    combined.includes('damaged flag cleared') ||
+    combined.includes('damage flag cleared') ||
+    combined.includes('damaged status cleared') ||
+    combined.includes('cleared damaged') ||
+    combined.includes('flags cleared') ||
+    combined.includes('auditor clearance') ||
+    combined.includes('cleared by auditor')
+  );
+}
+
+/**
+ * Checks whether an audit log entry explicitly clears a previously applied Quarantine flag.
+ */
+export function isAuditEntryQuarantineClearance(entry: SkuAuditLogEntry): boolean {
+  const reasonText = (entry.reason || '').toLowerCase();
+  const notesText = (entry.notes || '').toLowerCase();
+  const combined = `${reasonText} ${notesText}`;
+
+  return (
+    combined.includes('quarantine cleared') ||
+    combined.includes('quarantine flag cleared') ||
+    combined.includes('quarantine released') ||
+    combined.includes('released from quarantine') ||
+    combined.includes('cleared quarantine') ||
+    combined.includes('flags cleared') ||
+    combined.includes('auditor clearance') ||
+    combined.includes('cleared by auditor')
+  );
+}
+
+/**
  * Evaluates whether an audit log entry flags an item as 'Under Quarantine' or 'Damaged'.
  */
 export function isAuditEntryQuarantineOrDamaged(entry: SkuAuditLogEntry): {
@@ -11,6 +50,17 @@ export function isAuditEntryQuarantineOrDamaged(entry: SkuAuditLogEntry): {
   flagType: 'quarantine' | 'damaged' | 'both' | null;
   statusLabel: string;
 } {
+  // Explicitly cleared Quarantine or Damaged status entries are clean resolution records, not active flags
+  if (isAuditEntryDamagedClearance(entry) || isAuditEntryQuarantineClearance(entry)) {
+    return {
+      isFlagged: false,
+      isQuarantine: false,
+      isDamaged: false,
+      flagType: null,
+      statusLabel: 'Clean'
+    };
+  }
+
   const reasonText = (entry.reason || '').toLowerCase();
   const notesText = (entry.notes || '').toLowerCase();
   const combined = `${reasonText} ${notesText}`;
@@ -97,18 +147,40 @@ export function checkSkuAuditLogSafety(
     return logSku === raw || cleanLogSku === cleanRaw;
   });
 
-  const flaggedEntries: SkuAuditLogEntry[] = [];
-  let hasQuarantine = false;
-  let hasDamaged = false;
+  // Evaluate chronologically (oldest -> newest) so auditor clearance entries supersede older flags
+  const chronologicalLogs = [...matchingLogs].sort(
+    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+  );
 
-  for (const entry of matchingLogs) {
+  let quarantineEntries: SkuAuditLogEntry[] = [];
+  let damagedEntries: SkuAuditLogEntry[] = [];
+
+  for (const entry of chronologicalLogs) {
+    const clearsQuarantine = isAuditEntryQuarantineClearance(entry);
+    const clearsDamaged = isAuditEntryDamagedClearance(entry);
+
+    if (clearsQuarantine || clearsDamaged) {
+      if (clearsQuarantine) quarantineEntries = [];
+      if (clearsDamaged) damagedEntries = [];
+      continue;
+    }
+
     const check = isAuditEntryQuarantineOrDamaged(entry);
     if (check.isFlagged) {
-      flaggedEntries.push(entry);
-      if (check.isQuarantine) hasQuarantine = true;
-      if (check.isDamaged) hasDamaged = true;
+      if (check.isQuarantine) quarantineEntries.push(entry);
+      if (check.isDamaged) damagedEntries.push(entry);
     }
   }
+
+  const hasQuarantine = quarantineEntries.length > 0;
+  const hasDamaged = damagedEntries.length > 0;
+
+  // Deduplicate active flagged entries
+  const flaggedMap = new Map<string, SkuAuditLogEntry>();
+  for (const entry of [...quarantineEntries, ...damagedEntries]) {
+    flaggedMap.set(entry.id, entry);
+  }
+  const flaggedEntries = Array.from(flaggedMap.values());
 
   if (flaggedEntries.length === 0) {
     return {
