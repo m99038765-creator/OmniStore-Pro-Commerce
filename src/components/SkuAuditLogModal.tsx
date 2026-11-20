@@ -25,11 +25,13 @@ import {
   Printer,
   ShieldAlert,
   Loader2,
-  MessageSquarePlus
+  MessageSquarePlus,
+  Activity
 } from 'lucide-react';
 import { Product, SkuAuditLogEntry } from '../types';
 import { getAuditLogsForSku } from '../data/initialAuditLogs';
 import { AuditLogExportModal } from './AuditLogExportModal';
+import { SkuVarianceHistoryChart, buildSkuVarianceTimeline } from './SkuVarianceHistoryChart';
 import { useStore } from '../context/StoreContext';
 import {
   checkSkuAuditLogSafety,
@@ -72,6 +74,7 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
   const [copiedSku, setCopiedSku] = useState(false);
   const [copiedCsv, setCopiedCsv] = useState(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<'ledger' | 'variance'>('ledger');
 
   const RESOLVED_NOTE_PRESETS = [
     'Resolved: Physical QA inspection passed — packaging replaced & verified intact.',
@@ -148,13 +151,14 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
     }
   }, [isOpen, activeSku, warehouseAuditLogs]);
 
-  // Reset inline quick-clear composer when modal closes or SKU changes
+  // Reset inline quick-clear composer & tab when modal closes or SKU changes
   useEffect(() => {
     if (!isOpen) {
       setIsQuickClearOpen(false);
       setResolvedNoteInput('');
       setQuickClearTargetEntryId(null);
       setJustClearedInfo(null);
+      setActiveTab('ledger');
     }
   }, [isOpen, activeSku]);
 
@@ -297,6 +301,10 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
     return logs.reduce((acc, curr) => acc + curr.adjustmentValue, 0);
   }, [logs]);
 
+  const varianceDiscrepancyCount = useMemo(() => {
+    return buildSkuVarianceTimeline(logs, currentStock).filter(p => p.isDiscrepancyEvent).length;
+  }, [logs, currentStock]);
+
   if (!isOpen) return null;
 
   return (
@@ -309,7 +317,7 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
     >
       <div
         id="sku-audit-log-modal"
-        className="w-full max-w-2xl bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-in fade-in zoom-in-95 duration-200"
+        className="w-full max-w-3xl bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-in fade-in zoom-in-95 duration-200"
       >
         {/* Modal Header */}
         <div className="p-4 sm:p-5 border-b border-neutral-800 bg-neutral-950/80 flex items-start justify-between gap-3">
@@ -578,6 +586,72 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
           </div>
         </div>
 
+        {/* Modal View Tabs: Audit Ledger vs. Variance History */}
+        <div
+          id="sku-audit-modal-tabs"
+          className="px-4 sm:px-5 pt-2.5 bg-neutral-950/60 border-b border-neutral-800 flex items-center justify-between gap-2 flex-wrap"
+        >
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              id="sku-audit-tab-ledger"
+              onClick={() => setActiveTab('ledger')}
+              className={`px-3.5 py-2 text-xs font-semibold border-b-2 transition-colors flex items-center gap-1.5 cursor-pointer ${
+                activeTab === 'ledger'
+                  ? 'border-amber-400 text-white'
+                  : 'border-transparent text-neutral-400 hover:text-neutral-200'
+              }`}
+            >
+              <ClipboardList className={`w-3.5 h-3.5 ${activeTab === 'ledger' ? 'text-amber-400' : 'text-neutral-500'}`} />
+              <span>Audit Ledger</span>
+              <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-neutral-800 text-neutral-300 border border-neutral-700">
+                {logs.length}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              id="sku-audit-tab-variance"
+              onClick={() => setActiveTab('variance')}
+              className={`px-3.5 py-2 text-xs font-semibold border-b-2 transition-colors flex items-center gap-1.5 cursor-pointer ${
+                activeTab === 'variance'
+                  ? 'border-sky-400 text-white'
+                  : 'border-transparent text-neutral-400 hover:text-neutral-200'
+              }`}
+            >
+              <Activity className={`w-3.5 h-3.5 ${activeTab === 'variance' ? 'text-sky-400' : 'text-neutral-500'}`} />
+              <span>Variance History</span>
+              {varianceDiscrepancyCount > 0 ? (
+                <span className="text-[10px] font-mono font-bold px-1.5 py-0.2 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/45">
+                  {varianceDiscrepancyCount}
+                </span>
+              ) : (
+                <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/35">
+                  0
+                </span>
+              )}
+            </button>
+          </div>
+
+          <span className="text-[10px] font-mono text-neutral-500 pb-2 hidden sm:inline">
+            {activeTab === 'variance'
+              ? 'Recharts dual-axis stock count vs. discrepancy timeline'
+              : 'Filterable chronological adjustment records'}
+          </span>
+        </div>
+
+        {activeTab === 'variance' ? (
+          <div className="flex-1 overflow-y-auto p-4 sm:p-5">
+            <SkuVarianceHistoryChart
+              sku={activeSku}
+              logs={logs}
+              currentStock={currentStock}
+              lowStockThreshold={product?.lowStockThreshold}
+              isLoading={isLoading}
+            />
+          </div>
+        ) : (
+          <>
         {/* Filter & Search Bar */}
         <div className="p-3 sm:px-5 border-b border-neutral-800 bg-neutral-900/90 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5">
           <div className="relative flex-1">
@@ -894,6 +968,8 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
             })
           )}
         </div>
+          </>
+        )}
 
         {/* Modal Footer */}
         <div className="p-4 border-t border-neutral-800 bg-neutral-950/80 flex items-center justify-between gap-3 flex-wrap">

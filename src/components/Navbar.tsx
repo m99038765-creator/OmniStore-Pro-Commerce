@@ -13,7 +13,8 @@ import {
   History,
   User,
   ChevronDown,
-  Truck
+  Truck,
+  Grid3x3
 } from 'lucide-react';
 import { useStore } from '../context/StoreContext';
 import { VoiceDictationButton } from './VoiceDictationButton';
@@ -24,6 +25,7 @@ export const Navbar: React.FC = () => {
     orders,
     setIsCartOpen,
     setIsAdminOpen,
+    setIsDensityHeatmapOpen,
     setIsTrackingOpen,
     setIsOrderHistoryOpen,
     comparedProductIds,
@@ -159,6 +161,17 @@ export const Navbar: React.FC = () => {
               <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-neutral-800 border border-neutral-700 text-neutral-300">
                 {metrics.unitsInStock} units
               </span>
+            </button>
+
+            {/* Warehouse Inventory Density Heatmap Button */}
+            <button
+              id="nav-density-heatmap-button"
+              onClick={() => setIsDensityHeatmapOpen(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-sky-300 hover:text-white bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/35 rounded-xl transition-colors"
+              title="Open D3 Warehouse Inventory Density Heatmap by regional hub and aisle"
+            >
+              <Grid3x3 className="w-4 h-4 text-sky-400" />
+              <span className="hidden lg:inline">Density Map</span>
             </button>
 
             {/* Compare Button (Visible when 1+ items selected) */}

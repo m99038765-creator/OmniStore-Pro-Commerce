@@ -36,7 +36,8 @@ import {
   ClipboardCheck,
   ArrowLeftRight,
   ArchiveX,
-  Radio
+  Radio,
+  Grid3x3
 } from 'lucide-react';
 import { useStore } from '../context/StoreContext';
 import { Product } from '../types';
@@ -69,6 +70,7 @@ export const WarehouseAdminModal: React.FC = () => {
   const {
     isAdminOpen,
     setIsAdminOpen,
+    setIsDensityHeatmapOpen,
     adminActiveTab,
     setAdminActiveTab,
     adminSelectedProductIds,
@@ -521,6 +523,18 @@ export const WarehouseAdminModal: React.FC = () => {
             </div>
 
             <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+              <button
+                type="button"
+                id="warehouse-density-heatmap-btn"
+                onClick={() => setIsDensityHeatmapOpen(true)}
+                title="Visualize warehouse inventory density per aisle and bay across regional hubs using an interactive D3 heatmap"
+                className="px-3 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-200 border border-amber-500/45 text-xs font-mono font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-xs"
+              >
+                <Grid3x3 className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span className="hidden md:inline">Density Heatmap</span>
+                <span className="md:hidden">Heatmap</span>
+              </button>
+
               <button
                 type="button"
                 id="warehouse-batch-decommission-btn"

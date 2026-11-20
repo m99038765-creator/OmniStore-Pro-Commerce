@@ -1182,6 +1182,7 @@ app.post('/api/inventory/audit-logs', (req, res) => {
     operatorName,
     reason,
     warehouse,
+    batchNumber,
     notes
   } = req.body;
 
@@ -1204,6 +1205,7 @@ app.post('/api/inventory/audit-logs', (req, res) => {
     operatorName: operatorName || 'Julian Vance',
     reason: reason || 'Physical Stock Verification',
     warehouse: warehouse || prod?.warehouse || 'Bay Area Hub (WH-01)',
+    batchNumber: batchNumber || undefined,
     notes: notes || ''
   };
 
@@ -1383,6 +1385,36 @@ app.post('/api/inventory/simulate-purchase', (req, res) => {
     success: true,
     message: `Simulated external order for 1x ${target.name}`,
     remainingStock: target.stock
+  });
+});
+
+// Update SKU maintenance / storage instructions note
+app.post('/api/inventory/update-note', (req, res) => {
+  const { productId, note, updatedBy } = req.body as {
+    productId: string;
+    note?: string;
+    updatedBy?: string;
+  };
+
+  const prod = inventory.find(p => p.id === productId);
+  if (!prod) {
+    return res.status(404).json({ error: 'Product not found' });
+  }
+
+  const trimmed = typeof note === 'string' ? note.trim().slice(0, 240) : '';
+  const nowIso = new Date().toISOString();
+  const author = (updatedBy || 'Warehouse Staff').trim() || 'Warehouse Staff';
+
+  prod.warehouseNote = trimmed;
+  prod.warehouseNoteUpdatedAt = trimmed ? nowIso : undefined;
+  prod.warehouseNoteUpdatedBy = trimmed ? author : undefined;
+
+  res.json({
+    success: true,
+    product: prod,
+    note: trimmed
+      ? { text: trimmed, updatedAt: nowIso, updatedBy: author }
+      : null
   });
 });
 

@@ -36,8 +36,17 @@ export interface Product {
   wishlist?: boolean;
   warranty: string;
   warehouseTags?: string[];
+  warehouseNote?: string;
+  warehouseNoteUpdatedAt?: string;
+  warehouseNoteUpdatedBy?: string;
   isRelatedCluster?: boolean;
   reservedBy?: string;
+}
+
+export interface SkuWarehouseNote {
+  text: string;
+  updatedAt: string;
+  updatedBy: string;
 }
 
 export interface SavedAddress {

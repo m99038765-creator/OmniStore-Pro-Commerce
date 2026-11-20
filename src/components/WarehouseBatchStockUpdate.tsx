@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import QRCode from 'qrcode';
 import {
   Printer,
@@ -28,7 +28,11 @@ import {
   Lock,
   Check,
   FileDown,
-  Truck
+  Truck,
+  ShieldAlert,
+  ShieldCheck,
+  ClipboardCheck,
+  FileSearch
 } from 'lucide-react';
 import { useStore } from '../context/StoreContext';
 import { ScannerModal } from './ScannerModal';
@@ -36,8 +40,11 @@ import { BulkQrCodeModal } from './BulkQrCodeModal';
 import { VoiceDictationButton } from './VoiceDictationButton';
 import { ReservationConflictAlertModal } from './ReservationConflictAlertModal';
 import { BatchAutoRestockPanel } from './BatchAutoRestockPanel';
+import { BulkQuarantinePanel } from './BulkQuarantinePanel';
 import { downloadBatchShippingLabelsPdf } from '../utils/batchShippingLabelsPdf';
-import { Product } from '../types';
+import { runBatchQuickAudit, BatchQuickAuditReport } from '../utils/batchQuickAudit';
+import { checkSkuAuditLogSafety } from '../utils/skuAuditSafety';
+import { Product, SkuAuditLogEntry } from '../types';
 
 interface WarehouseBatchStockUpdateProps {
   selectedProductIds: string[];
@@ -52,7 +59,20 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
   onFinishedSuccess,
   onSwitchToInventory
 }) => {
-  const { products, batchAdjustStock, addAlert, isReserved, sku30DayCapacityMap, userProfile } = useStore();
+  const {
+    products,
+    batchAdjustStock,
+    addAlert,
+    isReserved,
+    sku30DayCapacityMap,
+    userProfile,
+    warehouseAuditLogs,
+    refreshWarehouseAuditLogs,
+    reconciledDiscrepancySkus,
+    openGlobalSkuAuditLog,
+    openBatchReconcileForSkus,
+    bulkQuarantineSkus
+  } = useStore();
 
   const [adjustmentType, setAdjustmentType] = useState<'add' | 'subtract' | 'set'>('add');
   const [adjustmentQuantity, setAdjustmentQuantity] = useState<number>(10);
@@ -60,6 +80,17 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
   const [quickNote, setQuickNote] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isGeneratingShippingPdf, setIsGeneratingShippingPdf] = useState(false);
+  const [isRunningQuickAudit, setIsRunningQuickAudit] = useState(false);
+  const [quickAuditReport, setQuickAuditReport] = useState<BatchQuickAuditReport | null>(null);
+  const [isBulkQuarantineOpen, setIsBulkQuarantineOpen] = useState(false);
+  const [isApplyingBulkQuarantine, setIsApplyingBulkQuarantine] = useState(false);
+  const [bulkQuarantineReport, setBulkQuarantineReport] = useState<{
+    batchNumber: string;
+    reason: string;
+    notes: string;
+    timestamp: string;
+    entries: SkuAuditLogEntry[];
+  } | null>(null);
   const [progressPercent, setProgressPercent] = useState<number>(0);
   const [progressStep, setProgressStep] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState('');
@@ -113,6 +144,44 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
   const selectedProducts = useMemo(() => {
     return products.filter(p => selectedProductIds.includes(p.id));
   }, [products, selectedProductIds]);
+
+  // Track which SKUs are currently flagged as Under Quarantine in the master audit log
+  const quarantinedProductIds = useMemo(() => {
+    const flaggedIds = new Set<string>();
+    for (const p of products) {
+      const safety = checkSkuAuditLogSafety(p.sku, warehouseAuditLogs);
+      if (!safety.isSafe && (safety.flagType === 'quarantine' || safety.flagType === 'both')) {
+        flaggedIds.add(p.id);
+      }
+    }
+    return flaggedIds;
+  }, [products, warehouseAuditLogs]);
+
+  // Auto-close Bulk Quarantine composer if all SKUs are deselected
+  useEffect(() => {
+    if (selectedProductIds.length === 0 && isBulkQuarantineOpen) {
+      setIsBulkQuarantineOpen(false);
+    }
+  }, [selectedProductIds.length, isBulkQuarantineOpen]);
+
+  // Keep active Quick Audit report live-synced if audit logs, reconciliations, or selection change
+  useEffect(() => {
+    setQuickAuditReport(prev => {
+      if (!prev) return null;
+      const auditedStillSelected = selectedProducts.filter(p =>
+        Boolean(prev.resultsByProductId[p.id])
+      );
+      if (auditedStillSelected.length === 0) {
+        return null;
+      }
+      return runBatchQuickAudit(
+        auditedStillSelected,
+        warehouseAuditLogs,
+        reconciledDiscrepancySkus,
+        { ranAt: prev.ranAt, ranAtDisplay: prev.ranAtDisplay }
+      );
+    });
+  }, [selectedProducts, warehouseAuditLogs, reconciledDiscrepancySkus]);
 
   // Projected impact calculations
   const projectedItems = useMemo(() => {
@@ -310,6 +379,110 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
     }
   };
 
+  // Validate every selected SKU against the authoritative master audit log
+  const handleRunQuickAudit = async () => {
+    if (selectedProducts.length === 0 || isRunningQuickAudit) return;
+    setIsRunningQuickAudit(true);
+    try {
+      const refreshedLogs = await refreshWarehouseAuditLogs();
+      const authoritativeLogs =
+        refreshedLogs && refreshedLogs.length > 0 ? refreshedLogs : warehouseAuditLogs;
+
+      const report = runBatchQuickAudit(
+        selectedProducts,
+        authoritativeLogs,
+        reconciledDiscrepancySkus
+      );
+      setQuickAuditReport(report);
+
+      if (report.discrepancySkuCount > 0) {
+        addAlert(
+          'critical',
+          `Quick Audit: ${report.discrepancySkuCount} SKU Discrepanc${report.discrepancySkuCount === 1 ? 'y' : 'ies'} Found`,
+          `${report.discrepancySkuCount} of ${report.totalChecked} selected SKU(s) failed master audit log validation (${report.totalIssueCount} total issue${report.totalIssueCount === 1 ? '' : 's'}). Flagged items are highlighted in red for immediate attention.`
+        );
+      } else {
+        addAlert(
+          'success',
+          'Quick Audit Passed (0 Discrepancies)',
+          `All ${report.totalChecked} selected SKU(s) matched the master audit log across ${report.totalMasterLogEntriesScanned} recorded audit entries.`
+        );
+      }
+    } catch (err) {
+      console.error('Quick Audit validation error:', err);
+      const fallbackReport = runBatchQuickAudit(
+        selectedProducts,
+        warehouseAuditLogs,
+        reconciledDiscrepancySkus
+      );
+      setQuickAuditReport(fallbackReport);
+      addAlert(
+        fallbackReport.discrepancySkuCount > 0 ? 'critical' : 'info',
+        'Quick Audit Completed (Local Master Ledger)',
+        fallbackReport.discrepancySkuCount > 0
+          ? `Detected ${fallbackReport.discrepancySkuCount} SKU(s) with master audit discrepancies.`
+          : `All ${fallbackReport.totalChecked} selected SKU(s) validated clean against local master audit log.`
+      );
+    } finally {
+      setIsRunningQuickAudit(false);
+    }
+  };
+
+  const handleExcludeDiscrepantSkus = () => {
+    if (!quickAuditReport || quickAuditReport.discrepancySkuCount === 0) return;
+    const discrepantIds = new Set(quickAuditReport.discrepantItems.map(i => i.productId));
+    setSelectedProductIds(prev => prev.filter(id => !discrepantIds.has(id)));
+    addAlert(
+      'info',
+      'Discrepant SKUs Excluded',
+      `Removed ${discrepantIds.size} SKU(s) with master audit discrepancies from the active batch selection.`
+    );
+  };
+
+  const handleOpenBulkQuarantine = () => {
+    if (selectedProducts.length === 0) return;
+    setIsBulkQuarantineOpen(true);
+    requestAnimationFrame(() => {
+      document.getElementById('batch-bulk-quarantine-panel')?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'nearest'
+      });
+    });
+  };
+
+  const handleConfirmBulkQuarantine = async (reason: string, notes: string) => {
+    if (selectedProductIds.length === 0 || isApplyingBulkQuarantine) return;
+    setIsApplyingBulkQuarantine(true);
+    try {
+      const result = await bulkQuarantineSkus({
+        productIds: selectedProductIds,
+        reason,
+        notes
+      });
+      if (result.success) {
+        setIsBulkQuarantineOpen(false);
+        setBulkQuarantineReport({
+          batchNumber: result.batchNumber,
+          reason,
+          notes,
+          timestamp: new Date().toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit'
+          }),
+          entries: result.entries
+        });
+        if (onFinishedSuccess) {
+          onFinishedSuccess(
+            `Placed ${result.quarantinedCount} SKU${result.quarantinedCount === 1 ? '' : 's'} Under Quarantine (${result.batchNumber}) with individual audit log entries.`
+          );
+        }
+      }
+    } finally {
+      setIsApplyingBulkQuarantine(false);
+    }
+  };
+
   const handleExecuteBatchAdjustment = async () => {
 
     if (selectedProductIds.length === 0) return;
@@ -467,6 +640,237 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
         </div>
       )}
 
+      {/* Bulk Quarantine Inline Composer */}
+      <BulkQuarantinePanel
+        isOpen={isBulkQuarantineOpen}
+        selectedProducts={selectedProducts}
+        quarantinedProductIds={quarantinedProductIds}
+        isSubmitting={isApplyingBulkQuarantine}
+        onCancel={() => setIsBulkQuarantineOpen(false)}
+        onConfirm={handleConfirmBulkQuarantine}
+      />
+
+      {/* Bulk Quarantine Completion Confirmation Banner */}
+      {bulkQuarantineReport && (
+        <div
+          id="batch-bulk-quarantine-success-banner"
+          className="rounded-2xl bg-rose-950/75 border-2 border-rose-500/75 p-4 shadow-lg shadow-rose-950/60 animate-in fade-in slide-in-from-top-2 duration-300"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-start gap-3 min-w-0">
+              <div className="w-9 h-9 rounded-xl bg-rose-500/25 border border-rose-400/60 flex items-center justify-center text-rose-300 shrink-0 mt-0.5">
+                <ShieldAlert className="w-5 h-5 stroke-[2.25]" />
+              </div>
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h4 className="text-sm font-bold text-rose-100">
+                    Bulk Quarantine Applied — {bulkQuarantineReport.entries.length} SKU{bulkQuarantineReport.entries.length === 1 ? '' : 's'} Marked Under Quarantine
+                  </h4>
+                  <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-rose-500/30 text-rose-100 border border-rose-400/60">
+                    {bulkQuarantineReport.batchNumber}
+                  </span>
+                  <span className="text-[10px] font-mono text-rose-300/80">
+                    {bulkQuarantineReport.timestamp}
+                  </span>
+                </div>
+                <p className="text-xs text-rose-200/90 mt-1">
+                  <strong className="text-white">Reason:</strong> {bulkQuarantineReport.reason}
+                  {bulkQuarantineReport.notes ? ` — Note: "${bulkQuarantineReport.notes}"` : ''}
+                </p>
+                <div className="mt-2.5 flex flex-wrap gap-1.5 max-h-24 overflow-y-auto pr-1">
+                  {bulkQuarantineReport.entries.map(entry => {
+                    const matchedProduct = products.find(p => p.id === entry.productId || p.sku === entry.sku);
+                    return (
+                      <button
+                        key={entry.id}
+                        type="button"
+                        onClick={() => openGlobalSkuAuditLog(entry.sku, matchedProduct || null)}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-rose-900/70 hover:bg-rose-800 border border-rose-400/50 text-[11px] font-mono text-rose-100 transition-colors cursor-pointer"
+                        title={`Inspect new Under Quarantine audit log entry for ${entry.sku}`}
+                      >
+                        <FileSearch className="w-3 h-3 text-rose-300" />
+                        <span className="font-bold">{entry.sku}</span>
+                        <span className="text-[10px] text-rose-300">Audit Logged</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            <button
+              id="dismiss-bulk-quarantine-banner-btn"
+              type="button"
+              onClick={() => setBulkQuarantineReport(null)}
+              className="p-1.5 rounded-lg text-rose-300 hover:text-white hover:bg-rose-800/50 transition-colors cursor-pointer shrink-0"
+              title="Dismiss quarantine summary"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Quick Audit Validation Results Banner */}
+      {quickAuditReport && (
+        <div
+          id="batch-quick-audit-results-banner"
+          className={`rounded-2xl p-4 shadow-lg animate-in fade-in slide-in-from-top-2 duration-300 border-2 ${
+            quickAuditReport.discrepancySkuCount > 0
+              ? 'bg-rose-950/75 border-rose-500/80 shadow-rose-950/60'
+              : 'bg-emerald-950/60 border-emerald-500/60 shadow-emerald-950/40'
+          }`}
+        >
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="flex items-start gap-3 min-w-0">
+              <div
+                className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 mt-0.5 border ${
+                  quickAuditReport.discrepancySkuCount > 0
+                    ? 'bg-rose-500/25 border-rose-400/60 text-rose-300'
+                    : 'bg-emerald-500/20 border-emerald-400/50 text-emerald-300'
+                }`}
+              >
+                {quickAuditReport.discrepancySkuCount > 0 ? (
+                  <ShieldAlert className="w-5 h-5 stroke-[2.25] animate-pulse" />
+                ) : (
+                  <ShieldCheck className="w-5 h-5 stroke-[2.25]" />
+                )}
+              </div>
+
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h4
+                    className={`text-sm font-bold ${
+                      quickAuditReport.discrepancySkuCount > 0 ? 'text-rose-100' : 'text-emerald-100'
+                    }`}
+                  >
+                    {quickAuditReport.discrepancySkuCount > 0
+                      ? `Quick Audit Alert: ${quickAuditReport.discrepancySkuCount} of ${quickAuditReport.totalChecked} Selected SKU${quickAuditReport.totalChecked === 1 ? '' : 's'} Flagged`
+                      : `Quick Audit Verified: All ${quickAuditReport.totalChecked} Selected SKU${quickAuditReport.totalChecked === 1 ? '' : 's'} Match Master Audit Log`}
+                  </h4>
+                  <span
+                    className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-bold border ${
+                      quickAuditReport.discrepancySkuCount > 0
+                        ? 'bg-rose-500/30 text-rose-100 border-rose-400/60'
+                        : 'bg-emerald-500/25 text-emerald-200 border-emerald-400/50'
+                    }`}
+                  >
+                    {quickAuditReport.discrepancySkuCount > 0
+                      ? `${quickAuditReport.totalIssueCount} Discrepanc${quickAuditReport.totalIssueCount === 1 ? 'y' : 'ies'}`
+                      : '0 Discrepancies'}
+                  </span>
+                  <span className="text-[10px] font-mono text-neutral-400">
+                    Audited {quickAuditReport.ranAtDisplay} · {quickAuditReport.totalMasterLogEntriesScanned} master log entries
+                  </span>
+                </div>
+
+                <p
+                  className={`text-xs mt-1 ${
+                    quickAuditReport.discrepancySkuCount > 0 ? 'text-rose-200/90' : 'text-emerald-200/90'
+                  }`}
+                >
+                  {quickAuditReport.discrepancySkuCount > 0
+                    ? `Discrepant SKUs are highlighted in red below (${quickAuditReport.verifiedSkuCount} verified clean). Inspect individual audit logs, reconcile variances, or exclude flagged SKUs before applying uniform batch updates.`
+                    : 'Live stock counts, warehouse hub assignments, and quarantine/damage flags are fully synchronized with the master audit ledger.'}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+              {quickAuditReport.discrepancySkuCount > 0 && (
+                <>
+                  <button
+                    id="batch-quick-audit-exclude-btn"
+                    type="button"
+                    onClick={handleExcludeDiscrepantSkus}
+                    className="px-2.5 py-1.5 rounded-lg bg-rose-500 hover:bg-rose-400 text-white font-bold text-[11px] transition-colors cursor-pointer shadow-sm active:scale-95"
+                  >
+                    Exclude Discrepant ({quickAuditReport.discrepancySkuCount})
+                  </button>
+                  <button
+                    id="batch-quick-audit-reconcile-btn"
+                    type="button"
+                    onClick={() =>
+                      openBatchReconcileForSkus(quickAuditReport.discrepantItems.map(item => item.sku))
+                    }
+                    className="px-2.5 py-1.5 rounded-lg bg-rose-900/90 hover:bg-rose-800 border border-rose-400/60 text-rose-100 font-semibold text-[11px] transition-colors cursor-pointer"
+                  >
+                    Batch Reconcile
+                  </button>
+                </>
+              )}
+              <button
+                id="batch-quick-audit-rerun-btn"
+                type="button"
+                onClick={handleRunQuickAudit}
+                disabled={isRunningQuickAudit || selectedProductIds.length === 0}
+                className="px-2.5 py-1.5 rounded-lg bg-neutral-900/80 hover:bg-neutral-800 border border-neutral-700 text-neutral-200 font-semibold text-[11px] inline-flex items-center gap-1 transition-colors cursor-pointer disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3 h-3 ${isRunningQuickAudit ? 'animate-spin' : ''}`} />
+                <span>Re-Run</span>
+              </button>
+              <button
+                id="dismiss-quick-audit-banner-btn"
+                type="button"
+                onClick={() => setQuickAuditReport(null)}
+                className="p-1.5 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800/70 transition-colors cursor-pointer"
+                title="Dismiss Quick Audit results"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+
+          {quickAuditReport.discrepantItems.length > 0 && (
+            <div className="mt-3 pt-3 border-t border-rose-500/35 space-y-1.5 max-h-40 overflow-y-auto pr-1">
+              {quickAuditReport.discrepantItems.map(item => (
+                <div
+                  key={item.productId}
+                  id={`quick-audit-discrepancy-row-${item.productId}`}
+                  className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-rose-950/90 border border-rose-500/60"
+                >
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-rose-500 text-white">
+                        {item.sku}
+                      </span>
+                      <span className="text-xs font-semibold text-rose-100 truncate">
+                        {item.productName}
+                      </span>
+                      {item.masterLogStock !== null && item.stockDelta !== null && item.stockDelta !== 0 && (
+                        <span className="text-[10px] font-mono font-bold text-rose-200 bg-rose-900/80 border border-rose-400/50 px-1.5 py-0.5 rounded">
+                          Live: {item.auditedStock}u vs Log: {item.masterLogStock}u
+                        </span>
+                      )}
+                      {item.issues.map((issue, idx) => (
+                        <span
+                          key={`${item.productId}-${issue.code}-${idx}`}
+                          className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-rose-500/25 text-rose-200 border border-rose-400/60"
+                        >
+                          {issue.label}
+                        </span>
+                      ))}
+                    </div>
+                    <p className="text-[11px] text-rose-200/85 leading-snug">
+                      {item.issues.map(i => i.detail).join(' · ')}
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => openGlobalSkuAuditLog(item.sku, item.product)}
+                    className="px-2.5 py-1 rounded-lg bg-rose-900/80 hover:bg-rose-800 border border-rose-400/60 text-rose-100 text-[11px] font-semibold inline-flex items-center gap-1 transition-colors cursor-pointer shrink-0"
+                  >
+                    <FileSearch className="w-3 h-3 text-rose-300" />
+                    <span>Inspect Log</span>
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Main Grid: Left SKU Selection Table, Right Uniform Adjustment Controller */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
         {/* Left Column: SKU Multi-Selector (lg:col-span-7) */}
@@ -484,8 +888,79 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
                 </p>
               </div>
 
-              {/* Selection Counter Pill */}
-              <div className="flex items-center gap-2">
+              {/* Bulk Quarantine, Quick Audit & Selection Counter Pill */}
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  id="batch-bulk-quarantine-btn"
+                  type="button"
+                  onClick={handleOpenBulkQuarantine}
+                  disabled={selectedProductIds.length === 0 || isApplyingBulkQuarantine}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
+                    selectedProductIds.length === 0 || isApplyingBulkQuarantine
+                      ? 'bg-neutral-900 text-neutral-500 border-neutral-800 cursor-not-allowed'
+                      : isBulkQuarantineOpen
+                      ? 'bg-rose-600 text-white border-rose-400 ring-1 ring-rose-400/60 shadow-sm'
+                      : 'bg-rose-500/15 hover:bg-rose-500/25 text-rose-200 border-rose-500/55 shadow-sm active:scale-95'
+                  }`}
+                  title={
+                    selectedProductIds.length === 0
+                      ? 'Select one or more SKUs to place Under Quarantine with a shared audit note'
+                      : `Mark ${selectedProductIds.length} selected SKU(s) as Under Quarantine and log audit entries for each`
+                  }
+                >
+                  <ShieldAlert className="w-3.5 h-3.5 text-rose-300" />
+                  <span>Bulk Quarantine</span>
+                </button>
+
+                <button
+                  id="batch-quick-audit-btn"
+                  type="button"
+                  onClick={handleRunQuickAudit}
+                  disabled={selectedProductIds.length === 0 || isRunningQuickAudit}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
+                    selectedProductIds.length === 0 || isRunningQuickAudit
+                      ? 'bg-neutral-900 text-neutral-500 border-neutral-800 cursor-not-allowed'
+                      : quickAuditReport && quickAuditReport.discrepancySkuCount > 0
+                      ? 'bg-rose-500/25 hover:bg-rose-500/35 text-rose-100 border-rose-500 ring-1 ring-rose-500/50 shadow-sm shadow-rose-950/60 active:scale-95'
+                      : quickAuditReport && quickAuditReport.discrepancySkuCount === 0
+                      ? 'bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-200 border-emerald-500/60 active:scale-95'
+                      : 'bg-sky-500/15 hover:bg-sky-500/25 text-sky-200 border-sky-500/50 shadow-sm active:scale-95'
+                  }`}
+                  title={
+                    selectedProductIds.length === 0
+                      ? 'Select one or more SKUs to validate against the master audit log'
+                      : `Validate ${selectedProductIds.length} selected SKU(s) against the master audit log and highlight discrepancies in red`
+                  }
+                >
+                  {isRunningQuickAudit ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin text-sky-300" />
+                      <span>Auditing...</span>
+                    </>
+                  ) : quickAuditReport && quickAuditReport.discrepancySkuCount > 0 ? (
+                    <>
+                      <ShieldAlert className="w-3.5 h-3.5 text-rose-300" />
+                      <span>Quick Audit</span>
+                      <span className="px-1.5 py-0.2 rounded-md bg-rose-500 text-white text-[10px] font-mono font-bold">
+                        {quickAuditReport.discrepancySkuCount} Flagged
+                      </span>
+                    </>
+                  ) : quickAuditReport && quickAuditReport.discrepancySkuCount === 0 ? (
+                    <>
+                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-300" />
+                      <span>Quick Audit</span>
+                      <span className="px-1.5 py-0.2 rounded-md bg-emerald-500/30 text-emerald-100 text-[10px] font-mono font-bold">
+                        Clean
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <ClipboardCheck className="w-3.5 h-3.5 text-sky-300" />
+                      <span>Quick Audit</span>
+                    </>
+                  )}
+                </button>
+
                 <span
                   id="batch-selected-counter-badge"
                   className={`px-2.5 py-1 rounded-full text-xs font-mono font-bold border transition-colors ${
@@ -665,7 +1140,7 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
                 No inventory SKUs match your filter criteria.
               </div>
             ) : (
-              filteredProducts.map((product, index) => {
+              filteredProducts.map((product) => {
                 const isSelected = selectedProductIds.includes(product.id);
                 const isOutOfStock = product.stock <= 0;
                 const isLowStock = product.stock > 0 && product.stock <= product.lowStockThreshold;
@@ -673,25 +1148,33 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
                 const isBelow20Cap = Boolean(cap30d?.isBelow20Pct);
 
                 const isRecentlyUpdated = recentlyUpdatedIds.includes(product.id);
+                const auditResult = isSelected ? quickAuditReport?.resultsByProductId[product.id] : undefined;
+                const hasAuditDiscrepancy = Boolean(auditResult?.hasDiscrepancy);
+                const isAuditVerified = Boolean(auditResult && !auditResult.hasDiscrepancy);
 
                 return (
                   <div
                     key={product.id}
                     id={`batch-sku-item-${product.id}`}
+                    data-audit-discrepancy={hasAuditDiscrepancy ? 'true' : 'false'}
                     onClick={() => handleToggleProduct(product.id)}
-                    className={`p-3 rounded-xl border transition-all duration-700 cursor-pointer flex items-center justify-between gap-3 ${
+                    className={`p-3 rounded-xl border transition-all duration-300 cursor-pointer flex items-center justify-between gap-3 ${
                       isRecentlyUpdated
                         ? 'bg-emerald-500/25 border-emerald-400 ring-2 ring-emerald-500/40 shadow-lg shadow-emerald-950/40 scale-[1.01]'
+                        : hasAuditDiscrepancy
+                        ? 'bg-rose-950/65 border-rose-500 ring-2 ring-rose-500/60 shadow-md shadow-rose-950/60 hover:bg-rose-950/80'
                         : isSelected
                         ? (product.reserved > 0 || isReserved(product.id))
                           ? 'bg-amber-950/30 border-amber-500/70 shadow-sm ring-1 ring-amber-500/40'
+                          : isAuditVerified
+                          ? 'bg-emerald-950/25 border-emerald-500/60 shadow-sm ring-1 ring-emerald-500/30'
                           : 'bg-sky-950/25 border-sky-500/60 shadow-sm ring-1 ring-sky-500/30'
                         : (product.reserved > 0 || isReserved(product.id))
                         ? 'bg-neutral-900/60 border-amber-500/40 hover:border-amber-400'
                         : 'bg-neutral-900/50 border-neutral-800/80 hover:border-neutral-700 hover:bg-neutral-900/80'
                     }`}
                   >
-                    <div className="flex items-center gap-3 min-w-0">
+                    <div className="flex items-center gap-3 min-w-0 flex-1">
                       {/* Checkbox Icon */}
                       <button
                         type="button"
@@ -701,7 +1184,9 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
                         }}
                         className={`w-5 h-5 rounded-md flex items-center justify-center border transition-colors shrink-0 ${
                           isSelected
-                            ? (product.reserved > 0 || isReserved(product.id))
+                            ? hasAuditDiscrepancy
+                              ? 'bg-rose-500 border-rose-400 text-white'
+                              : (product.reserved > 0 || isReserved(product.id))
                               ? 'bg-amber-500 border-amber-400 text-neutral-950'
                               : 'bg-sky-500 border-sky-400 text-neutral-950'
                             : (product.reserved > 0 || isReserved(product.id))
@@ -717,18 +1202,62 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
                       <img
                         src={product.images[0]}
                         alt=""
-                        className="w-10 h-10 rounded-lg object-cover bg-neutral-950 shrink-0 border border-neutral-800"
+                        className={`w-10 h-10 rounded-lg object-cover bg-neutral-950 shrink-0 border ${
+                          hasAuditDiscrepancy ? 'border-rose-500/70' : 'border-neutral-800'
+                        }`}
                       />
 
                       {/* Info */}
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-[10px] font-mono font-bold px-1.5 py-0.2 rounded bg-neutral-950 text-sky-400 border border-neutral-800">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span
+                            className={`text-[10px] font-mono font-bold px-1.5 py-0.2 rounded border ${
+                              hasAuditDiscrepancy
+                                ? 'bg-rose-950 text-rose-200 border-rose-500/70'
+                                : 'bg-neutral-950 text-sky-400 border-neutral-800'
+                            }`}
+                          >
                             {product.sku}
                           </span>
-                          <h5 className="text-xs font-semibold text-white truncate max-w-xs">
+                          <h5
+                            className={`text-xs font-semibold truncate max-w-xs ${
+                              hasAuditDiscrepancy ? 'text-rose-100' : 'text-white'
+                            }`}
+                          >
                             {product.name}
                           </h5>
+                          {hasAuditDiscrepancy && (
+                            <span
+                              id={`batch-sku-audit-discrepancy-badge-${product.id}`}
+                              className="inline-flex items-center gap-1 text-[10px] font-mono font-bold text-white bg-rose-600 px-1.5 py-0.2 rounded border border-rose-400 shadow-xs"
+                            >
+                              <ShieldAlert className="w-2.5 h-2.5 shrink-0" />
+                              <span>AUDIT DISCREPANCY</span>
+                            </span>
+                          )}
+                          {isAuditVerified && (
+                            <span
+                              id={`batch-sku-audit-verified-badge-${product.id}`}
+                              className="inline-flex items-center gap-1 text-[10px] font-mono font-bold text-emerald-300 bg-emerald-500/15 px-1.5 py-0.2 rounded border border-emerald-500/40"
+                            >
+                              <ShieldCheck className="w-2.5 h-2.5 shrink-0" />
+                              <span>Audit Verified</span>
+                            </span>
+                          )}
+                          {quarantinedProductIds.has(product.id) && (
+                            <span
+                              id={`batch-sku-quarantine-badge-${product.id}`}
+                              onClick={e => {
+                                e.stopPropagation();
+                                openGlobalSkuAuditLog(product.sku, product);
+                              }}
+                              className="inline-flex items-center gap-1 text-[10px] font-mono font-bold text-rose-200 bg-rose-950/90 hover:bg-rose-900 px-1.5 py-0.2 rounded border border-rose-500/65 shadow-xs cursor-pointer"
+                              title={`SKU ${product.sku} is currently marked Under Quarantine — click to open audit log`}
+                            >
+                              <ShieldAlert className="w-2.5 h-2.5 text-rose-400 shrink-0" />
+                              <span>Under Quarantine</span>
+                            </span>
+                          )}
                           {(product.reserved > 0 || isReserved(product.id)) && (
                             <span
                               id={`batch-sku-reserved-pill-${product.id}`}
@@ -748,6 +1277,34 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
                             {product.warehouse.split('(')[0].trim()}
                           </span>
                         </div>
+
+                        {/* Inline Red Audit Discrepancy Callout */}
+                        {hasAuditDiscrepancy && auditResult && (
+                          <div className="mt-1.5 flex flex-wrap items-center gap-1.5 bg-rose-950/90 border border-rose-500/60 rounded-lg px-2 py-1">
+                            {auditResult.issues.map((issue, idx) => (
+                              <span
+                                key={`${product.id}-row-issue-${idx}`}
+                                className="text-[10px] font-mono font-bold text-rose-200 bg-rose-500/25 border border-rose-400/50 px-1.5 py-0.2 rounded"
+                              >
+                                {issue.label}
+                              </span>
+                            ))}
+                            <span className="text-[10px] text-rose-200/90 truncate max-w-full">
+                              {auditResult.issues[0]?.detail}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={e => {
+                                e.stopPropagation();
+                                openGlobalSkuAuditLog(product.sku, product);
+                              }}
+                              className="ml-auto inline-flex items-center gap-1 text-[10px] font-semibold text-rose-100 hover:text-white underline underline-offset-2 cursor-pointer"
+                            >
+                              <FileSearch className="w-2.5 h-2.5" />
+                              <span>Audit Log</span>
+                            </button>
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -755,7 +1312,9 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
                     <div className="text-right shrink-0">
                       <span
                         className={`text-xs font-mono font-bold px-2 py-0.5 rounded-full border ${
-                          isOutOfStock
+                          hasAuditDiscrepancy
+                            ? 'bg-rose-500/25 text-rose-100 border-rose-400'
+                            : isOutOfStock
                             ? 'bg-rose-500/15 text-rose-300 border-rose-500/30'
                             : isLowStock
                             ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
@@ -764,6 +1323,11 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
                       >
                         {product.stock} units
                       </span>
+                      {hasAuditDiscrepancy && auditResult?.masterLogStock !== null && auditResult?.stockDelta !== 0 && (
+                        <span className="text-[9px] text-rose-300 font-mono font-bold block mt-0.5">
+                          Log: {auditResult?.masterLogStock}u ({auditResult?.stockDelta && auditResult.stockDelta > 0 ? `+${auditResult.stockDelta}` : auditResult?.stockDelta}u)
+                        </span>
+                      )}
                       {isLowStock && (
                         <span className="text-[9px] text-amber-400 font-mono block mt-0.5">
                           ≤ threshold ({product.lowStockThreshold})
@@ -1100,54 +1664,94 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
                 </div>
               ) : (
                 <div className="p-3 rounded-xl bg-neutral-950 border border-neutral-800/80 max-h-44 overflow-y-auto space-y-2 text-xs">
-                  {projectedItems.map((item, index) => (
-                    <div
-                      key={item.product.id}
-                      className="flex items-center justify-between gap-2 border-b border-neutral-900 pb-1.5 last:border-0 last:pb-0"
-                    >
-                      <div className="min-w-0">
-                        <span className="font-mono text-[10px] text-sky-400 bg-neutral-900 px-1 py-0.5 rounded mr-1.5 font-bold">
-                          {item.product.sku}
-                        </span>
-                        <span className="text-neutral-300 truncate inline-block max-w-[130px] align-middle text-[11px]">
-                          {item.product.name}
-                        </span>
-                        {(item.product.reserved > 0 || isReserved(item.product.id)) && (
+                  {projectedItems.map((item) => {
+                    const auditResult = quickAuditReport?.resultsByProductId[item.product.id];
+                    const hasDiscrepancy = Boolean(auditResult?.hasDiscrepancy);
+                    return (
+                      <div
+                        key={item.product.id}
+                        className={`flex items-center justify-between gap-2 transition-colors ${
+                          hasDiscrepancy
+                            ? 'bg-rose-950/60 border border-rose-500/75 rounded-lg px-2 py-1.5'
+                            : 'border-b border-neutral-900 pb-1.5 last:border-0 last:pb-0'
+                        }`}
+                      >
+                        <div className="min-w-0">
+                          <div className="flex items-center flex-wrap gap-1">
+                            <span
+                              className={`font-mono text-[10px] px-1 py-0.5 rounded font-bold ${
+                                hasDiscrepancy
+                                  ? 'text-white bg-rose-600'
+                                  : 'text-sky-400 bg-neutral-900'
+                              }`}
+                            >
+                              {item.product.sku}
+                            </span>
+                            <span
+                              className={`truncate inline-block max-w-[125px] align-middle text-[11px] ${
+                                hasDiscrepancy ? 'text-rose-100 font-semibold' : 'text-neutral-300'
+                              }`}
+                            >
+                              {item.product.name}
+                            </span>
+                            {hasDiscrepancy && auditResult && (
+                              <span
+                                className="inline-flex items-center gap-1 font-mono text-[9px] text-rose-100 bg-rose-500/30 px-1.5 py-0.2 rounded border border-rose-400/60 font-bold"
+                                title={auditResult.issues.map(i => i.detail).join(' | ')}
+                              >
+                                <ShieldAlert className="w-2.5 h-2.5 text-rose-300" />
+                                <span>{auditResult.issues[0]?.label || 'Discrepancy'}</span>
+                              </span>
+                            )}
+                            {(item.product.reserved > 0 || isReserved(item.product.id)) && (
+                              <span
+                                className="inline-flex items-center gap-1 font-mono text-[9px] text-amber-300 bg-amber-950/80 px-1.5 py-0.2 rounded border border-amber-500/40 font-bold"
+                                title={`Active Hold: ${item.product.reserved || 1} units reserved by ${item.product.reservedBy || 'Staff'}`}
+                              >
+                                <Lock className="w-2.5 h-2.5 text-amber-400" />
+                                <span>{item.product.reserved || 1} Reserved</span>
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2 font-mono text-xs shrink-0">
+                          <span className={hasDiscrepancy ? 'text-rose-200' : 'text-neutral-400'}>{item.oldStock}</span>
+                          <ArrowRight className="w-3 h-3 text-neutral-600" />
                           <span
-                            className="inline-flex items-center gap-1 font-mono text-[9px] text-amber-300 bg-amber-950/80 px-1.5 py-0.2 rounded border border-amber-500/40 ml-1.5 font-bold"
-                            title={`Active Hold: ${item.product.reserved || 1} units reserved by ${item.product.reservedBy || 'Staff'}`}
+                            className={`font-bold ${
+                              item.newStock === 0
+                                ? 'text-rose-400'
+                                : item.newStock <= item.product.lowStockThreshold
+                                ? 'text-amber-400'
+                                : 'text-emerald-400'
+                            }`}
                           >
-                            <Lock className="w-2.5 h-2.5 text-amber-400" />
-                            <span>{item.product.reserved || 1} Reserved</span>
+                            {item.newStock} units
                           </span>
-                        )}
+                          <span
+                            className={`text-[10px] font-bold px-1.5 py-0.2 rounded ${
+                              item.delta >= 0
+                                ? 'bg-emerald-500/20 text-emerald-300'
+                                : 'bg-amber-500/20 text-amber-300'
+                            }`}
+                          >
+                            {item.delta >= 0 ? `+${item.delta}` : item.delta}
+                          </span>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-2 font-mono text-xs shrink-0">
-                        <span className="text-neutral-400">{item.oldStock}</span>
-                        <ArrowRight className="w-3 h-3 text-neutral-600" />
-                        <span
-                          className={`font-bold ${
-                            item.newStock === 0
-                              ? 'text-rose-400'
-                              : item.newStock <= item.product.lowStockThreshold
-                              ? 'text-amber-400'
-                              : 'text-emerald-400'
-                          }`}
-                        >
-                          {item.newStock} units
-                        </span>
-                        <span
-                          className={`text-[10px] font-bold px-1.5 py-0.2 rounded ${
-                            item.delta >= 0
-                              ? 'bg-emerald-500/20 text-emerald-300'
-                              : 'bg-amber-500/20 text-amber-300'
-                          }`}
-                        >
-                          {item.delta >= 0 ? `+${item.delta}` : item.delta}
-                        </span>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
+                </div>
+              )}
+
+              {quickAuditReport && quickAuditReport.discrepancySkuCount > 0 && (
+                <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-rose-950/70 border border-rose-500/60 text-[11px] text-rose-200">
+                  <span className="flex items-center gap-1.5 font-semibold">
+                    <ShieldAlert className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                    <span>
+                      {quickAuditReport.discrepancySkuCount} selected SKU{quickAuditReport.discrepancySkuCount === 1 ? '' : 's'} have unresolved master audit discrepancies.
+                    </span>
+                  </span>
                 </div>
               )}
             </div>
@@ -1199,6 +1803,32 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
                     </span>
                   </>
                 )}
+              </button>
+
+              <button
+                id="batch-action-bulk-quarantine-btn"
+                type="button"
+                onClick={handleOpenBulkQuarantine}
+                disabled={selectedProductIds.length === 0 || isSubmitting || isApplyingBulkQuarantine}
+                className={`w-full py-2.5 px-3.5 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-all cursor-pointer border ${
+                  selectedProductIds.length === 0 || isSubmitting || isApplyingBulkQuarantine
+                    ? 'bg-neutral-900 border-neutral-800 text-neutral-500 cursor-not-allowed'
+                    : isBulkQuarantineOpen
+                    ? 'bg-rose-600 border-rose-400 text-white shadow-sm'
+                    : 'bg-rose-500/20 border-rose-500/55 text-rose-200 hover:bg-rose-500/30 hover:border-rose-400 shadow-sm active:scale-[0.98]'
+                }`}
+                title={
+                  selectedProductIds.length === 0
+                    ? 'Select one or more SKUs to place Under Quarantine'
+                    : `Mark ${selectedProductIds.length} selected SKU(s) as Under Quarantine with a shared reason and audit log note`
+                }
+              >
+                <ShieldAlert className="w-3.5 h-3.5 text-rose-300 shrink-0" />
+                <span>
+                  {selectedProductIds.length === 0
+                    ? 'Bulk Quarantine (Select SKUs)'
+                    : `Bulk Quarantine (${selectedProductIds.length} SKU${selectedProductIds.length === 1 ? '' : 's'})`}
+                </span>
               </button>
 
               <button

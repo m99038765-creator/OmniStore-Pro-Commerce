@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { Product, CartItem, Order, RealtimeMessage, WarehouseStockMetrics, ShippingDetails, PaymentFormState, InventoryAlert, ProductReview, UserProfile, SavedAddress, CommunicationPreferences, SkuAuditLogEntry, SkuSafetyCheckResult, WarehouseConflictEvent, AutoReplenishmentRule, AutoReplenishmentDraftPO, AutoRestockRequest, CapacityPeakRecord } from '../types';
+import { Product, CartItem, Order, RealtimeMessage, WarehouseStockMetrics, ShippingDetails, PaymentFormState, InventoryAlert, ProductReview, UserProfile, SavedAddress, CommunicationPreferences, SkuAuditLogEntry, SkuSafetyCheckResult, WarehouseConflictEvent, AutoReplenishmentRule, AutoReplenishmentDraftPO, AutoRestockRequest, CapacityPeakRecord, SkuWarehouseNote } from '../types';
 import { INITIAL_SAMPLE_ORDERS, createSampleOrder } from '../data/sampleOrders';
 import { INITIAL_USER_PROFILE } from '../data/initialUserProfile';
 import { INITIAL_SKU_AUDIT_LOGS } from '../data/initialAuditLogs';
@@ -66,6 +66,7 @@ interface StoreContextType {
   isCartOpen: boolean;
   isCheckoutOpen: boolean;
   isAdminOpen: boolean;
+  isDensityHeatmapOpen: boolean;
   adminActiveTab: 'inventory' | 'batch' | 'reconcile' | 'scanner';
   adminSelectedProductIds: string[];
   selectedCatalogProductIds: string[];
@@ -101,6 +102,16 @@ interface StoreContextType {
   toggleSkuDamagedFlag: (product: Product) => boolean;
   refreshWarehouseAuditLogs: () => Promise<SkuAuditLogEntry[]>;
   clearSkuAuditFlags: (sku: string, auditorName?: string, resolvedNote?: string) => Promise<boolean>;
+  bulkQuarantineSkus: (params: {
+    productIds: string[];
+    reason: string;
+    notes?: string;
+  }) => Promise<{
+    success: boolean;
+    quarantinedCount: number;
+    batchNumber: string;
+    entries: SkuAuditLogEntry[];
+  }>;
   flaggedAuditAlerts: FlaggedAuditAlert[];
   dismissFlaggedAuditAlert: (id: string) => void;
   globalAuditLogTarget: { sku: string; product?: Product | null } | null;
@@ -123,6 +134,11 @@ interface StoreContextType {
   simulatePriceDrop: (productId?: string, discountPercent?: number) => Promise<boolean>;
   updateProductPrice: (productId: string, newPrice: number) => Promise<boolean>;
   resetAllPrices: () => Promise<boolean>;
+
+  // SKU Maintenance & Storage Instructions Notes
+  skuNotes: Record<string, SkuWarehouseNote>;
+  getSkuNote: (product: Product) => SkuWarehouseNote | null;
+  updateSkuNote: (productId: string, noteText: string) => Promise<boolean>;
   
   // Actions
   setSearchQuery: (query: string) => void;
@@ -136,6 +152,7 @@ interface StoreContextType {
   setIsCartOpen: (open: boolean) => void;
   setIsCheckoutOpen: (open: boolean) => void;
   setIsAdminOpen: (open: boolean) => void;
+  setIsDensityHeatmapOpen: (open: boolean) => void;
   setAdminActiveTab: (tab: 'inventory' | 'batch' | 'reconcile' | 'scanner') => void;
   setAdminSelectedProductIds: React.Dispatch<React.SetStateAction<string[]>>;
   setIsTrackingOpen: (open: boolean) => void;
@@ -379,6 +396,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [isCartOpen, setIsCartOpen] = useState(false);
   const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
   const [isAdminOpen, setIsAdminOpen] = useState(false);
+  const [isDensityHeatmapOpen, setIsDensityHeatmapOpen] = useState(false);
   const [adminActiveTab, setAdminActiveTab] = useState<'inventory' | 'batch' | 'reconcile' | 'scanner'>('inventory');
   const [adminSelectedProductIds, setAdminSelectedProductIds] = useState<string[]>([]);
   const [adminTargetProductId, setAdminTargetProductId] = useState<string | null>(null);
@@ -836,6 +854,131 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     );
 
     return true;
+  }, [products, userProfile, addAlert]);
+
+  const bulkQuarantineSkus = useCallback(async (params: {
+    productIds: string[];
+    reason: string;
+    notes?: string;
+  }): Promise<{
+    success: boolean;
+    quarantinedCount: number;
+    batchNumber: string;
+    entries: SkuAuditLogEntry[];
+  }> => {
+    const uniqueIds = Array.from(new Set(params.productIds));
+    const targetProducts = products.filter(p => uniqueIds.includes(p.id));
+    if (targetProducts.length === 0) {
+      return { success: false, quarantinedCount: 0, batchNumber: '', entries: [] };
+    }
+
+    const now = new Date();
+    const batchNumber = `QRN-${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(
+      now.getDate()
+    ).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}${String(
+      now.getMinutes()
+    ).padStart(2, '0')}`;
+
+    const currentLogs = warehouseAuditLogsRef.current;
+    const latestTs = currentLogs.reduce((max, log) => {
+      const ts = new Date(log.timestamp).getTime();
+      return Number.isFinite(ts) && ts > max ? ts : max;
+    }, 0);
+    const baseTs = Math.max(Date.now(), latestTs + 1000);
+
+    const managerName = userProfile?.displayName || 'Warehouse Manager';
+    const operatorId = `OP-MGR (${managerName})`;
+    const rawReason = params.reason.trim() || 'QA Inspection Hold';
+    const formattedReason = rawReason.toLowerCase().includes('quarantin')
+      ? rawReason
+      : `Under Quarantine: ${rawReason}`;
+    const trimmedNotes = params.notes?.trim();
+    const formattedNotes = trimmedNotes
+      ? `Bulk Quarantine (${batchNumber}) — ${trimmedNotes}`
+      : `Bulk Quarantine (${batchNumber}) — Marked as Under Quarantine via Warehouse Admin Batch Operations (${targetProducts.length} SKUs).`;
+
+    const preparedEntries: SkuAuditLogEntry[] = targetProducts.map((product, idx) => ({
+      id: _getUniqueId('AUD-QRN'),
+      sku: product.sku,
+      productId: product.id,
+      productName: product.name,
+      timestamp: new Date(baseTs + idx * 50).toISOString(),
+      adjustmentValue: 0,
+      adjustmentType: 'reconciliation',
+      previousStock: product.stock,
+      newStock: product.stock,
+      operatorId,
+      operatorName: managerName,
+      reason: formattedReason,
+      warehouse: product.warehouse,
+      batchNumber,
+      notes: formattedNotes
+    }));
+
+    // Persist each quarantine entry to the backend audit log endpoint in parallel
+    const persistedEntries = await Promise.all(
+      preparedEntries.map(async entry => {
+        try {
+          const res = await fetch('/api/inventory/audit-logs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sku: entry.sku,
+              productName: entry.productName,
+              adjustmentValue: entry.adjustmentValue,
+              adjustmentType: entry.adjustmentType,
+              previousStock: entry.previousStock,
+              newStock: entry.newStock,
+              operatorId: entry.operatorId,
+              operatorName: entry.operatorName,
+              reason: entry.reason,
+              warehouse: entry.warehouse,
+              batchNumber: entry.batchNumber,
+              notes: entry.notes
+            })
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (data?.log?.id) {
+              return {
+                ...entry,
+                id: data.log.id,
+                timestamp: data.log.timestamp || entry.timestamp,
+                batchNumber: data.log.batchNumber || entry.batchNumber
+              } as SkuAuditLogEntry;
+            }
+          }
+        } catch {
+          // Fall back to local entry if offline/unreachable
+        }
+        return entry;
+      })
+    );
+
+    // Prepend all newly created quarantine audit entries to live state
+    // (automatically triggers Flagged Audit Alert toasts and safety badge updates)
+    setWarehouseAuditLogs(prev => {
+      const existingIds = new Set(prev.map(l => l.id));
+      const fresh = persistedEntries.filter(e => !existingIds.has(e.id));
+      const next = [...fresh, ...prev].sort(
+        (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+      );
+      warehouseAuditLogsRef.current = next;
+      return next;
+    });
+
+    addAlert(
+      'critical',
+      `Bulk Quarantine Applied (${persistedEntries.length} SKU${persistedEntries.length === 1 ? '' : 's'})`,
+      `Marked ${persistedEntries.map(e => e.sku).join(', ')} as Under Quarantine (${batchNumber}). Audit log entries recorded for every SKU.`
+    );
+
+    return {
+      success: true,
+      quarantinedCount: persistedEntries.length,
+      batchNumber,
+      entries: persistedEntries
+    };
   }, [products, userProfile, addAlert]);
 
   const [userReservations, setUserReservations] = useState<Record<string, number>>(() => {
@@ -4153,6 +4296,128 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     return false;
   }, [addAlert, fetchInitialData]);
 
+  // Per-SKU Warehouse Maintenance & Storage Instructions Notes (persisted to localStorage + backend API)
+  const [skuNotes, setSkuNotes] = useState<Record<string, SkuWarehouseNote>>(() => {
+    const seededDefaults: Record<string, SkuWarehouseNote> = {
+      'AUD-REF-8040': {
+        text: 'Store upright on anti-vibration pallet; keep clear of magnetic fields (40–55% RH).',
+        updatedAt: new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString(),
+        updatedBy: 'Julian Vance'
+      },
+      'DISP-OLED-49': {
+        text: 'Fragile curved QD-OLED panel — stack max 1 high; verify foam corner guards before dispatch.',
+        updatedAt: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+        updatedBy: 'Sora Tanaka'
+      },
+      'OPT-ANAMOR-35': {
+        text: 'Climate dry-cabinet storage only (<35% RH); verify rear mount cap seal after bench QA.',
+        updatedAt: new Date(Date.now() - 9 * 60 * 60 * 1000).toISOString(),
+        updatedBy: 'Mei Chen'
+      },
+      'COMP-WORKSTATION-X9': {
+        text: 'ESD-safe bay required; confirm 15-min thermal burn-in sticker before express staging.',
+        updatedAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+        updatedBy: 'Raj Patel'
+      }
+    };
+    try {
+      const saved = localStorage.getItem('omnistore_sku_warehouse_notes');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed === 'object') {
+          return { ...seededDefaults, ...parsed };
+        }
+      }
+    } catch {
+      // ignore storage errors
+    }
+    return seededDefaults;
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('omnistore_sku_warehouse_notes', JSON.stringify(skuNotes));
+    } catch {
+      // ignore storage quota errors
+    }
+  }, [skuNotes]);
+
+  const getSkuNote = useCallback(
+    (product: Product): SkuWarehouseNote | null => {
+      const skuKey = product.sku.trim().toUpperCase();
+      if (Object.prototype.hasOwnProperty.call(skuNotes, skuKey)) {
+        const stored = skuNotes[skuKey];
+        return stored && stored.text.trim() ? stored : null;
+      }
+      if (product.warehouseNote && product.warehouseNote.trim()) {
+        return {
+          text: product.warehouseNote.trim(),
+          updatedAt: product.warehouseNoteUpdatedAt || new Date().toISOString(),
+          updatedBy: product.warehouseNoteUpdatedBy || 'Warehouse Staff'
+        };
+      }
+      return null;
+    },
+    [skuNotes]
+  );
+
+  const updateSkuNote = useCallback(
+    async (productId: string, noteText: string): Promise<boolean> => {
+      const target = products.find(p => p.id === productId);
+      if (!target) return false;
+
+      const trimmed = noteText.trim().slice(0, 240);
+      const author = userProfile?.displayName || 'Warehouse Staff';
+      const nowIso = new Date().toISOString();
+      const skuKey = target.sku.trim().toUpperCase();
+
+      setSkuNotes(prev => ({
+        ...prev,
+        [skuKey]: trimmed
+          ? { text: trimmed, updatedAt: nowIso, updatedBy: author }
+          : { text: '', updatedAt: nowIso, updatedBy: author }
+      }));
+
+      setProducts(prev =>
+        prev.map(p =>
+          p.id === productId
+            ? {
+                ...p,
+                warehouseNote: trimmed,
+                warehouseNoteUpdatedAt: trimmed ? nowIso : undefined,
+                warehouseNoteUpdatedBy: trimmed ? author : undefined
+              }
+            : p
+        )
+      );
+
+      try {
+        await fetch('/api/inventory/update-note', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            productId,
+            note: trimmed,
+            updatedBy: author
+          })
+        });
+      } catch {
+        // local state + localStorage remain authoritative when offline
+      }
+
+      addAlert(
+        trimmed ? 'success' : 'info',
+        trimmed ? `SKU Note Saved (${target.sku})` : `SKU Note Cleared (${target.sku})`,
+        trimmed
+          ? `Updated maintenance / storage instructions for ${target.sku}: "${trimmed}"`
+          : `Removed maintenance / storage instructions for ${target.sku}.`
+      );
+
+      return true;
+    },
+    [products, userProfile, addAlert]
+  );
+
   const [recentSessionSkus, setRecentSessionSkus] = useState<string[]>([]);
 
   const trackSkuSearch = useCallback((query: string) => {
@@ -4233,6 +4498,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         isCartOpen,
         isCheckoutOpen,
         isAdminOpen,
+        isDensityHeatmapOpen,
         adminActiveTab,
         adminSelectedProductIds,
         isTrackingOpen,
@@ -4260,6 +4526,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         simulatePriceDrop,
         updateProductPrice,
         resetAllPrices,
+        skuNotes,
+        getSkuNote,
+        updateSkuNote,
         setSearchQuery,
         setSkuSearchQuery,
         trackSkuSearch,
@@ -4274,6 +4543,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         toggleSkuDamagedFlag,
         refreshWarehouseAuditLogs,
         clearSkuAuditFlags,
+        bulkQuarantineSkus,
         flaggedAuditAlerts,
         dismissFlaggedAuditAlert,
         globalAuditLogTarget,
@@ -4285,6 +4555,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         setIsCartOpen,
         setIsCheckoutOpen,
         setIsAdminOpen,
+        setIsDensityHeatmapOpen,
         setAdminActiveTab,
         setAdminSelectedProductIds,
         selectedCatalogProductIds,

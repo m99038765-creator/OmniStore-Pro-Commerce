@@ -1,12 +1,13 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Navigation, Star, ShoppingBag, Eye, ShieldAlert, Check, MapPin, Sparkles, Scale, Heart, QrCode, BellRing, Zap, Barcode, AlertTriangle, CheckSquare, Square, Lock, Tag, Network, Sliders, Truck, MoreVertical, Flag, GitCompareArrows, BarChart3 } from 'lucide-react';
+import { Navigation, Star, ShoppingBag, Eye, ShieldAlert, Check, MapPin, Sparkles, Scale, Heart, QrCode, BellRing, Zap, Barcode, AlertTriangle, CheckSquare, Square, Lock, Tag, Network, Sliders, Truck, MoreVertical, Flag, GitCompareArrows, BarChart3, StickyNote } from 'lucide-react';
 import { Product } from '../types';
 import { getDistanceToWarehouse, MOCK_USER_LOCATION } from '../utils/distance';
 import { useStore } from '../context/StoreContext';
 import { TransitEstimationBadge } from './TransitEstimationBadge';
 import { QuickShipIndicator } from './QuickShipIndicator';
 import { QuickReallocateModal } from './QuickReallocateModal';
+import { ProductCardWarehouseNote } from './ProductCardWarehouseNote';
 
 interface ProductCardProps {
   product: Product;
@@ -39,14 +40,18 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
     checkSkuSafety,
     toggleSkuDamagedFlag,
     getSkuRegionalConflict,
-    drillDownToInventoryChart
+    drillDownToInventoryChart,
+    getSkuNote,
+    updateSkuNote
   } = useStore();
   const itemReserved = isReserved(product.id);
   const [justAdded, setJustAdded] = useState(false);
   const [justQuickBought, setJustQuickBought] = useState(false);
   const [isReallocateOpen, setIsReallocateOpen] = useState(false);
   const [isOverflowOpen, setIsOverflowOpen] = useState(false);
+  const [isEditingNote, setIsEditingNote] = useState(false);
   const overflowMenuRef = useRef<HTMLDivElement>(null);
+  const skuNote = getSkuNote(product);
 
   useEffect(() => {
     if (!isOverflowOpen) return;
@@ -515,6 +520,21 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
                   <button
                     type="button"
                     role="menuitem"
+                    id={`overflow-edit-note-btn-${product.id}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setIsOverflowOpen(false);
+                      setIsEditingNote(true);
+                    }}
+                    className="w-full px-3 py-1.5 text-left text-xs text-amber-300 hover:text-amber-200 hover:bg-amber-500/15 flex items-center gap-2 transition-colors cursor-pointer"
+                  >
+                    <StickyNote className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <span>{skuNote ? 'Edit Storage / Maint. Note' : 'Add Storage / Maint. Note'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    role="menuitem"
                     onClick={(e) => {
                       e.stopPropagation();
                       toggleCompareProduct(product.id);
@@ -758,6 +778,19 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
               </span>
             </div>
           )}
+
+          {/* Per-SKU Warehouse Maintenance & Storage Instructions Note */}
+          <ProductCardWarehouseNote
+            product={product}
+            note={skuNote}
+            isEditing={isEditingNote}
+            onStartEdit={() => setIsEditingNote(true)}
+            onCancelEdit={() => setIsEditingNote(false)}
+            onSaveNote={async (text) => {
+              await updateSkuNote(product.id, text);
+              setIsEditingNote(false);
+            }}
+          />
         </div>
 
         {/* Price & Action Section */}

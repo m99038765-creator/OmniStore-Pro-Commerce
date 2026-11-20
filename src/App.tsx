@@ -51,6 +51,7 @@ import { SkuAuditLogModal } from './components/SkuAuditLogModal';
 import { CartDrawer } from './components/CartDrawer';
 import { CheckoutModal } from './components/CheckoutModal';
 import { WarehouseAdminModal } from './components/WarehouseAdminModal';
+import { WarehouseDensityHeatmapModal } from './components/WarehouseDensityHeatmapModal';
 import { OrderTrackingModal } from './components/OrderTrackingModal';
 import { OrderHistoryModal } from './components/OrderHistoryModal';
 import { NewsletterSubscription } from './components/NewsletterSubscription';
@@ -2519,6 +2520,7 @@ const StorefrontContent: React.FC = () => {
       <CartDrawer />
       <CheckoutModal />
       <WarehouseAdminModal />
+      <WarehouseDensityHeatmapModal />
       <OrderTrackingModal />
       <OrderHistoryModal />
       <ProductComparisonModal />
