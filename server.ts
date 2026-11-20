@@ -157,21 +157,96 @@ function removeEditorSession(clientId: string, sku?: string) {
   }
 }
 
-wss.on('connection', (ws) => {
+interface TelemetrySubscription {
+  ws: WebSocket;
+  productIds: string[];
+  intervalMs: number;
+  timer: NodeJS.Timeout;
+}
+
+const telemetrySubscriptions = new Map<string, TelemetrySubscription>();
+
+function buildTelemetryRefreshPayload(requestedProductIds: string[], intervalMs: number) {
+  const normalizedIds = Array.isArray(requestedProductIds)
+    ? Array.from(new Set(requestedProductIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)))
+    : [];
+
+  const scopedToSelection = normalizedIds.length > 0;
+  const targetProducts = scopedToSelection
+    ? inventory.filter((p) => normalizedIds.includes(p.id) || normalizedIds.includes(p.sku))
+    : inventory;
+
+  const totalUnits = inventory.reduce((sum, p) => sum + p.stock, 0);
+  const lowStockCount = inventory.filter((p) => p.stock <= p.lowStockThreshold).length;
+  const activeReservations = inventory.reduce((sum, p) => sum + (p.reserved || 0), 0);
+
+  return {
+    scopedToSelection,
+    requestedProductIds: normalizedIds,
+    syncedSkuCount: targetProducts.length,
+    intervalMs,
+    items: targetProducts.map((p) => ({
+      id: p.id,
+      sku: p.sku,
+      stock: p.stock,
+      reserved: p.reserved,
+      availableStock: Math.max(0, p.stock - (p.reserved || 0)),
+      lowStockThreshold: p.lowStockThreshold,
+      price: p.price,
+      warehouse: p.warehouse
+    })),
+    metrics: {
+      totalSkus: inventory.length,
+      unitsInStock: totalUnits,
+      lowStockItemsCount: lowStockCount,
+      ordersProcessedToday: 24 + orders.length,
+      activeReservations
+    },
+    activeConflictsCount: activeConflicts.size,
+    serverTimestamp: new Date().toISOString()
+  };
+}
+
+function sendTelemetryRefreshFrame(ws: WebSocket, productIds: string[], intervalMs: number) {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  const frame: RealtimeMessage = {
+    type: 'telemetry:refresh',
+    payload: buildTelemetryRefreshPayload(productIds, intervalMs),
+    timestamp: new Date().toISOString()
+  };
+  try {
+    ws.send(JSON.stringify(frame));
+  } catch (err) {
+    console.error('WS telemetry refresh send error:', err);
+  }
+}
+
+function clearTelemetrySubscription(clientId: string) {
+  const existing = telemetrySubscriptions.get(clientId);
+  if (existing) {
+    clearInterval(existing.timer);
+    telemetrySubscriptions.delete(clientId);
+  }
+}
+
+wss.on('connection', (ws, req) => {
   const clientId = _getUniqueServerId("client");
+  const isTelemetryAutoSyncChannel = Boolean(req?.url && req.url.includes('channel=warehouse-auto-sync'));
   wsClients.add(ws);
 
-  // Send initial inventory sync on connect
-  const initialSyncMsg: RealtimeMessage = {
-    type: 'inventory:sync',
-    payload: {
-      products: inventory,
-      ordersCount: orders.length,
-      activeConflicts: Array.from(activeConflicts.values())
-    },
-    timestamp: new Date().toISOString(),
-  };
-  ws.send(JSON.stringify(initialSyncMsg));
+  // Send initial inventory sync on connect (skip full dump for dedicated auto-sync channel which subscribes immediately)
+  if (!isTelemetryAutoSyncChannel) {
+    const initialSyncMsg: RealtimeMessage = {
+      type: 'inventory:sync',
+      payload: {
+        products: inventory,
+        ordersCount: orders.length,
+        activeConflicts: Array.from(activeConflicts.values())
+      },
+      timestamp: new Date().toISOString(),
+    };
+    ws.send(JSON.stringify(initialSyncMsg));
+  }
 
   ws.on('message', (raw) => {
     try {
@@ -195,6 +270,41 @@ wss.on('connection', (ws) => {
       } else if (msg.type === 'inventory:editing_stop') {
         const { sku } = msg.payload || {};
         removeEditorSession(clientId, sku);
+      } else if (msg.type === 'telemetry:subscribe') {
+        const { productIds = [], intervalMs = 60000 } = msg.payload || {};
+        const clampedInterval = Math.max(15000, Math.min(300000, Number(intervalMs) || 60000));
+        const normalizedIds = Array.isArray(productIds) ? productIds : [];
+
+        clearTelemetrySubscription(clientId);
+
+        // Immediately send authoritative snapshot on subscribe
+        sendTelemetryRefreshFrame(ws, normalizedIds, clampedInterval);
+
+        // Schedule server-side 60-second background telemetry push
+        const timer = setInterval(() => {
+          if (ws.readyState !== WebSocket.OPEN) {
+            clearTelemetrySubscription(clientId);
+            return;
+          }
+          sendTelemetryRefreshFrame(ws, normalizedIds, clampedInterval);
+        }, clampedInterval);
+
+        telemetrySubscriptions.set(clientId, {
+          ws,
+          productIds: normalizedIds,
+          intervalMs: clampedInterval,
+          timer
+        });
+      } else if (msg.type === 'telemetry:pull') {
+        const { productIds } = msg.payload || {};
+        const existing = telemetrySubscriptions.get(clientId);
+        const idsToUse = Array.isArray(productIds)
+          ? productIds
+          : existing?.productIds || [];
+        const intervalToUse = existing?.intervalMs || 60000;
+        sendTelemetryRefreshFrame(ws, idsToUse, intervalToUse);
+      } else if (msg.type === 'telemetry:unsubscribe') {
+        clearTelemetrySubscription(clientId);
       }
     } catch (e) {
       console.error('WS message parse error:', e);
@@ -204,11 +314,13 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     wsClients.delete(ws);
     removeEditorSession(clientId);
+    clearTelemetrySubscription(clientId);
   });
 
   ws.on('error', () => {
     wsClients.delete(ws);
     removeEditorSession(clientId);
+    clearTelemetrySubscription(clientId);
   });
 });
 
@@ -874,6 +986,125 @@ app.post('/api/inventory/batch-adjust', (req, res) => {
     quantity: qty,
     reason: reason || 'Manual batch inventory adjustment',
     deltas: adjustmentDeltas
+  });
+});
+
+// Admin: Batch decommission obsolete SKUs (strictly enforces stock === 0)
+app.post('/api/inventory/batch-decommission', (req, res) => {
+  const { productIds, reason, operatorName } = req.body as {
+    productIds: string[];
+    reason?: string;
+    operatorName?: string;
+  };
+
+  if (!Array.isArray(productIds) || productIds.length === 0) {
+    return res.status(400).json({
+      success: false,
+      error: 'No product SKUs selected for batch decommission.'
+    });
+  }
+
+  const requestedTargets = productIds
+    .map(pid => inventory.find(p => p.id === pid || p.sku === pid))
+    .filter((p): p is (typeof inventory)[number] => Boolean(p));
+
+  const uniqueTargets = Array.from(
+    new Map(requestedTargets.map(p => [p.id, p])).values()
+  );
+
+  if (uniqueTargets.length === 0) {
+    return res.status(404).json({
+      success: false,
+      error: 'None of the selected SKUs were found in active inventory.'
+    });
+  }
+
+  // Strict server-side zero-stock enforcement
+  const blockedProducts = uniqueTargets
+    .filter(p => p.stock > 0)
+    .map(p => ({
+      id: p.id,
+      sku: p.sku,
+      name: p.name,
+      stock: p.stock
+    }));
+
+  if (blockedProducts.length > 0) {
+    return res.status(400).json({
+      success: false,
+      error: `Zero-stock enforcement: ${blockedProducts.length} selected SKU(s) still have remaining stock and cannot be decommissioned.`,
+      blockedProducts
+    });
+  }
+
+  const cleanReason =
+    (reason && reason.trim()) ||
+    'Obsolete zero-stock SKU decommissioned from active warehouse catalog.';
+  const resolvedOperator = operatorName?.trim() || 'Warehouse Manager';
+  const decommissionBatch = `DECOMM-${Date.now().toString().slice(-6)}`;
+  const nowIso = new Date().toISOString();
+
+  const decommissionedIds = new Set(uniqueTargets.map(p => p.id));
+  const auditEntries: SkuAuditLogEntry[] = [];
+
+  for (const prod of uniqueTargets) {
+    const entry: SkuAuditLogEntry = {
+      id: _getUniqueServerId('audit'),
+      sku: prod.sku,
+      productId: prod.id,
+      productName: prod.name,
+      timestamp: nowIso,
+      adjustmentValue: 0,
+      adjustmentType: 'reconciliation',
+      previousStock: 0,
+      newStock: 0,
+      operatorId: `OP-MGR (${resolvedOperator})`,
+      operatorName: resolvedOperator,
+      reason: 'Batch Decommission — Obsolete SKU Removed',
+      warehouse: prod.warehouse,
+      batchNumber: decommissionBatch,
+      notes: cleanReason
+    };
+    skuAuditLogs.unshift(entry);
+    auditEntries.push(entry);
+  }
+
+  // Remove decommissioned SKUs in-place from inventory array
+  for (let i = inventory.length - 1; i >= 0; i--) {
+    if (decommissionedIds.has(inventory[i].id)) {
+      inventory.splice(i, 1);
+    }
+  }
+
+  // Broadcast updated catalog to all connected clients
+  broadcast({
+    type: 'inventory:sync',
+    payload: {
+      products: inventory,
+      activeConflicts: Array.from(activeConflicts.values())
+    },
+    timestamp: nowIso
+  });
+
+  broadcast({
+    type: 'inventory:alert',
+    payload: {
+      level: 'low_stock',
+      message: `BATCH DECOMMISSION: Removed ${uniqueTargets.length} obsolete zero-stock SKU(s) (${uniqueTargets
+        .map(p => p.sku)
+        .join(', ')}).`
+    },
+    timestamp: nowIso
+  });
+
+  return res.json({
+    success: true,
+    decommissionedCount: uniqueTargets.length,
+    decommissionedSkus: uniqueTargets.map(p => p.sku),
+    decommissionedIds: uniqueTargets.map(p => p.id),
+    remainingCount: inventory.length,
+    auditEntries,
+    timestamp: nowIso
   });
 });
 

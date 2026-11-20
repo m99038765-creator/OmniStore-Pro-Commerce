@@ -26,13 +26,17 @@ import {
   TrendingUp,
   AlertCircle,
   Lock,
-  Check
+  Check,
+  FileDown,
+  Truck
 } from 'lucide-react';
 import { useStore } from '../context/StoreContext';
 import { ScannerModal } from './ScannerModal';
 import { BulkQrCodeModal } from './BulkQrCodeModal';
 import { VoiceDictationButton } from './VoiceDictationButton';
 import { ReservationConflictAlertModal } from './ReservationConflictAlertModal';
+import { BatchAutoRestockPanel } from './BatchAutoRestockPanel';
+import { downloadBatchShippingLabelsPdf } from '../utils/batchShippingLabelsPdf';
 import { Product } from '../types';
 
 interface WarehouseBatchStockUpdateProps {
@@ -48,13 +52,14 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
   onFinishedSuccess,
   onSwitchToInventory
 }) => {
-  const { products, batchAdjustStock, addAlert, isReserved } = useStore();
+  const { products, batchAdjustStock, addAlert, isReserved, sku30DayCapacityMap, userProfile } = useStore();
 
   const [adjustmentType, setAdjustmentType] = useState<'add' | 'subtract' | 'set'>('add');
   const [adjustmentQuantity, setAdjustmentQuantity] = useState<number>(10);
   const [adjustmentReason, setAdjustmentReason] = useState<string>('Inbound Supplier Restock');
   const [quickNote, setQuickNote] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isGeneratingShippingPdf, setIsGeneratingShippingPdf] = useState(false);
   const [progressPercent, setProgressPercent] = useState<number>(0);
   const [progressStep, setProgressStep] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState('');
@@ -271,7 +276,37 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
       printWindow.document.close();
     } catch (err) {
       console.error('Error generating labels:', err);
-      addAlert('Failed to generate print layout.', 'error');
+      addAlert('critical', 'Print Layout Error', 'Failed to generate shelf sticker print layout.');
+    }
+  };
+
+  const selectedWarehouseHubsCount = useMemo(() => {
+    const hubs = new Set(selectedProducts.map(p => p.warehouse));
+    return hubs.size;
+  }, [selectedProducts]);
+
+  const handleBatchPrintShippingLabels = async () => {
+    if (selectedProducts.length === 0 || isGeneratingShippingPdf) return;
+    setIsGeneratingShippingPdf(true);
+    try {
+      const result = await downloadBatchShippingLabelsPdf(
+        selectedProducts,
+        userProfile?.displayName || 'Warehouse Operations Lead'
+      );
+      const summaryMsg = `Downloaded printable ${result.pageCount}-page Shipping Labels PDF (${result.batchId}) across ${result.warehousesCovered.length} warehouse hub${result.warehousesCovered.length === 1 ? '' : 's'}: ${result.warehousesCovered.map(w => w.split('(')[0].trim()).join(', ')}.`;
+      addAlert('success', 'Batch Shipping Labels PDF Ready', summaryMsg);
+      if (onFinishedSuccess) {
+        onFinishedSuccess(summaryMsg);
+      }
+    } catch (err) {
+      console.error('Error generating batch shipping labels PDF:', err);
+      addAlert(
+        'critical',
+        'Shipping Labels PDF Failed',
+        'Unable to compile the multi-page printable shipping labels PDF. Please try again.'
+      );
+    } finally {
+      setIsGeneratingShippingPdf(false);
     }
   };
 
@@ -362,6 +397,18 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
 
   return (
     <div id="warehouse-batch-update-container" className="space-y-5">
+      {/* Auto-Restock (<20% of 30-Day Max Recorded Capacity) Toggle & Live Queue */}
+      <BatchAutoRestockPanel
+        onSelectBelowCapacitySkus={(ids) => {
+          setSelectedProductIds(ids);
+        }}
+        onFulfillSuccess={(msg) => {
+          if (onFinishedSuccess) {
+            onFinishedSuccess(msg);
+          }
+        }}
+      />
+
       {/* Success Notification Banner */}
       {successReport && (
         <div
@@ -622,6 +669,8 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
                 const isSelected = selectedProductIds.includes(product.id);
                 const isOutOfStock = product.stock <= 0;
                 const isLowStock = product.stock > 0 && product.stock <= product.lowStockThreshold;
+                const cap30d = sku30DayCapacityMap[product.id];
+                const isBelow20Cap = Boolean(cap30d?.isBelow20Pct);
 
                 const isRecentlyUpdated = recentlyUpdatedIds.includes(product.id);
 
@@ -723,6 +772,18 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
                       {isOutOfStock && (
                         <span className="text-[9px] text-rose-400 font-mono block mt-0.5">
                           Sold out
+                        </span>
+                      )}
+                      {cap30d && (
+                        <span
+                          className={`text-[9px] font-mono block mt-0.5 ${
+                            isBelow20Cap ? 'text-rose-300 font-bold' : 'text-neutral-500'
+                          }`}
+                          title={`30-day maximum recorded capacity: ${cap30d.maxCapacity30d} units (20% trigger: <${cap30d.thresholdUnits20Pct}u)`}
+                        >
+                          {isBelow20Cap
+                            ? `<20% cap (${cap30d.capacityRatioPercent.toFixed(0)}% of ${cap30d.maxCapacity30d}u)`
+                            : `30d max: ${cap30d.maxCapacity30d}u (${cap30d.capacityRatioPercent.toFixed(0)}%)`}
                         </span>
                       )}
                     </div>
@@ -1136,6 +1197,41 @@ export const WarehouseBatchStockUpdate: React.FC<WarehouseBatchStockUpdateProps>
                         ? 'Select SKUs to Apply Batch Update'
                         : `Apply Uniform Adjustment (${selectedProductIds.length} SKUs)`}
                     </span>
+                  </>
+                )}
+              </button>
+
+              <button
+                id="batch-print-shipping-labels-btn"
+                type="button"
+                onClick={handleBatchPrintShippingLabels}
+                disabled={selectedProductIds.length === 0 || isSubmitting || isGeneratingShippingPdf}
+                className={`w-full py-2.5 px-3.5 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-all cursor-pointer border ${
+                  selectedProductIds.length === 0 || isSubmitting || isGeneratingShippingPdf
+                    ? 'bg-neutral-900 border-neutral-800 text-neutral-500 cursor-not-allowed'
+                    : 'bg-indigo-500/20 border-indigo-500/50 text-indigo-200 hover:bg-indigo-500/30 hover:border-indigo-400 shadow-sm active:scale-[0.98]'
+                }`}
+                title={
+                  selectedProductIds.length === 0
+                    ? 'Select one or more SKUs to generate a multi-page printable 4x6 shipping labels PDF'
+                    : `Generate printable ${selectedProductIds.length}-page 4x6 shipping labels PDF routed across ${selectedWarehouseHubsCount} warehouse location${selectedWarehouseHubsCount === 1 ? '' : 's'}`
+                }
+              >
+                {isGeneratingShippingPdf ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin text-indigo-300" />
+                    <span>Generating {selectedProductIds.length}-Page Shipping Labels PDF...</span>
+                  </>
+                ) : (
+                  <>
+                    <Truck className="w-3.5 h-3.5 text-indigo-300 shrink-0" />
+                    <span>Batch Print Shipping Labels</span>
+                    {selectedProductIds.length > 0 && (
+                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-indigo-500/30 border border-indigo-400/40 text-[10px] font-mono text-indigo-100">
+                        <FileDown className="w-2.5 h-2.5" />
+                        {selectedProductIds.length}p · {selectedWarehouseHubsCount} Hub{selectedWarehouseHubsCount === 1 ? '' : 's'}
+                      </span>
+                    )}
                   </>
                 )}
               </button>

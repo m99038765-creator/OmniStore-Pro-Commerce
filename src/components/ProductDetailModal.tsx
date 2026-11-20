@@ -40,9 +40,11 @@ import { TransitEstimationBadge } from './TransitEstimationBadge';
 import { QuickShipIndicator } from './QuickShipIndicator';
 import { ProductStockVelocityChart } from './ProductStockVelocityChart';
 import { ReorderSuggestionBadge } from './ReorderSuggestionBadge';
+import { AutoReplenishmentControl } from './AutoReplenishmentControl';
 
 export const ProductDetailModal: React.FC = () => {
   const {
+    products,
     quickViewProduct,
     setQuickViewProduct,
     openAdminForProduct,
@@ -124,7 +126,7 @@ export const ProductDetailModal: React.FC = () => {
 
   if (!quickViewProduct) return null;
 
-  const product = quickViewProduct;
+  const product = products.find(p => p.id === quickViewProduct.id) || quickViewProduct;
   const isOutOfStock = product.stock <= 0;
   const isLowStock = product.stock > 0 && product.stock <= product.lowStockThreshold;
   const isCompared = comparedProductIds.includes(product.id);
@@ -612,6 +614,9 @@ export const ProductDetailModal: React.FC = () => {
                     </form>
                   )}
                 </div>
+
+                {/* Auto-Replenishment Toggle & Target Stock Threshold Engine */}
+                <AutoReplenishmentControl product={product} />
 
                 {/* Key Features */}
                 <div className="mt-4">

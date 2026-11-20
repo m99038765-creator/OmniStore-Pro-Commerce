@@ -66,6 +66,7 @@ import { LowStockDashboardBanner } from './components/LowStockDashboardBanner';
 import { UserProfileModal } from './components/UserProfileModal';
 import { ScannerModal, extractSkuFromDecodedText } from './components/ScannerModal';
 import { VoiceDictationButton } from './components/VoiceDictationButton';
+import { SkuChipSparkline } from './components/SkuChipSparkline';
 import { REGIONAL_HUBS, calculateTransitEstimation } from './utils/transitCalculator';
 import { isAuditEntryQuarantineOrDamaged, checkSkuAuditLogSafety } from './utils/skuAuditSafety';
 
@@ -110,7 +111,13 @@ const StorefrontContent: React.FC = () => {
     setIsCompareModalOpen,
     maxDeliveryDays,
     setMaxDeliveryDays,
-    batchAdjustStock
+    batchAdjustStock,
+    globalAuditLogTarget,
+    closeGlobalSkuAuditLog,
+    warehouseConflicts,
+    warehouseAuditLogs,
+    getSkuRegionalConflict,
+    focusOrOpenWarehouseConflictToast
   } = useStore();
 
   const [copiedSku, setCopiedSku] = useState<string | null>(null);
@@ -1683,6 +1690,45 @@ const StorefrontContent: React.FC = () => {
               const isEditingThisChip = quickEditChipSku === sku;
               const wasJustUpdated = justUpdatedChipSku === sku;
 
+              // Detect active warehouse stock conflicts (live or cross-regional) and transit delays
+              const liveConflict = warehouseConflicts.find(
+                (c) =>
+                  c.sku.trim().toUpperCase() === sku.toUpperCase() ||
+                  (matchedProduct && c.productId === matchedProduct.id)
+              );
+              const regionalConflict = matchedProduct
+                ? getSkuRegionalConflict(matchedProduct)
+                : null;
+              const hasStockConflict = Boolean(liveConflict || regionalConflict);
+
+              const transitEst = matchedProduct
+                ? calculateTransitEstimation(
+                    matchedProduct.warehouse,
+                    customerDefaultWarehouse,
+                    matchedProduct.stock
+                  )
+                : null;
+              const hasTransitDelay = Boolean(
+                transitEst &&
+                  (transitEst.transitTier === 'out_of_stock' ||
+                    transitEst.transitTier === 'national_transit' ||
+                    (maxDeliveryDays !== null && transitEst.daysMax > maxDeliveryDays))
+              );
+              const hasTransitOrConflictWarning = hasStockConflict || hasTransitDelay;
+
+              const warningReasonParts: string[] = [];
+              if (hasStockConflict) {
+                warningReasonParts.push(
+                  liveConflict
+                    ? 'Active Warehouse Stock Conflict'
+                    : `Warehouse Stock Conflict (${regionalConflict?.summary || 'Multi-hub discrepancy'})`
+                );
+              }
+              if (hasTransitDelay && transitEst) {
+                warningReasonParts.push(`Transit Delay (${transitEst.daysLabel})`);
+              }
+              const warningTooltip = `${warningReasonParts.join(' • ')} — Click to open Warehouse Conflict Toast`;
+
               return (
                 <div
                   key={sku}
@@ -1695,6 +1741,10 @@ const StorefrontContent: React.FC = () => {
                       ? 'bg-sky-500/20 border-sky-400/80 shadow-xs ring-1 ring-sky-500/30'
                       : isCompared
                       ? 'bg-emerald-950/40 border-emerald-500/50 shadow-xs'
+                      : liveConflict
+                      ? 'bg-rose-950/40 border-rose-500/60 hover:border-rose-400'
+                      : hasTransitOrConflictWarning
+                      ? 'bg-amber-950/35 border-amber-500/55 hover:border-amber-400/80'
                       : isFlagged
                       ? 'bg-amber-950/40 border-amber-500/40 hover:border-amber-400/70'
                       : 'bg-neutral-900 border-neutral-800 hover:border-neutral-700'
@@ -1709,6 +1759,8 @@ const StorefrontContent: React.FC = () => {
                         ? `Clear SKU filter ${sku}`
                         : isFlagged
                         ? `[SAFE MODE] Flagged in audit log: ${safety?.statusLabel || 'Flagged'}`
+                        : hasTransitOrConflictWarning
+                        ? `${warningReasonParts.join(' • ')} — Click to filter SKU ${sku}`
                         : `Filter catalog specifically for SKU ${sku}`
                     }
                     className={`font-mono text-[10px] px-2 py-0.5 transition-colors cursor-pointer flex items-center gap-1 ${
@@ -1722,20 +1774,56 @@ const StorefrontContent: React.FC = () => {
                     {isFlagged && <ShieldAlert className="w-2.5 h-2.5 text-amber-400 shrink-0" />}
                     <span>{sku}</span>
                     {matchedProduct && !isEditingThisChip && (
-                      <span
-                        className={`text-[9px] px-1 rounded ${
-                          wasJustUpdated
-                            ? 'bg-emerald-500/25 text-emerald-300 font-bold'
-                            : matchedProduct.stock <= matchedProduct.lowStockThreshold
-                            ? 'text-amber-400'
-                            : 'text-neutral-500'
-                        }`}
-                        title={`Current stock: ${matchedProduct.stock} units`}
-                      >
-                        {wasJustUpdated ? `✓${matchedProduct.stock}` : `(${matchedProduct.stock})`}
-                      </span>
+                      <>
+                        <span
+                          className={`text-[9px] px-1 rounded ${
+                            wasJustUpdated
+                              ? 'bg-emerald-500/25 text-emerald-300 font-bold'
+                              : matchedProduct.stock <= matchedProduct.lowStockThreshold
+                              ? 'text-amber-400'
+                              : 'text-neutral-500'
+                          }`}
+                          title={`Current stock: ${matchedProduct.stock} units`}
+                        >
+                          {wasJustUpdated ? `✓${matchedProduct.stock}` : `(${matchedProduct.stock})`}
+                        </span>
+                        <SkuChipSparkline
+                          product={matchedProduct}
+                          orders={orders}
+                          auditLogs={warehouseAuditLogs}
+                        />
+                      </>
                     )}
                   </button>
+
+                  {matchedProduct && hasTransitOrConflictWarning && !isEditingThisChip && (
+                    <button
+                      type="button"
+                      id={`sku-chip-conflict-warning-${sku}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        focusOrOpenWarehouseConflictToast(matchedProduct, {
+                          hasStockConflict,
+                          hasTransitDelay,
+                          transitDelayLabel: transitEst?.daysLabel,
+                          regionalConflictSummary: regionalConflict?.summary
+                        });
+                      }}
+                      title={warningTooltip}
+                      aria-label={`Open Warehouse Conflict Toast for ${sku}: ${warningReasonParts.join(', ')}`}
+                      className={`px-1.5 py-0.5 border-l transition-all cursor-pointer flex items-center gap-1 ${
+                        liveConflict
+                          ? 'bg-rose-500/25 hover:bg-rose-500/40 text-rose-300 border-rose-500/50'
+                          : 'bg-amber-500/20 hover:bg-amber-500/35 text-amber-300 border-amber-500/45'
+                      }`}
+                    >
+                      <AlertTriangle
+                        className={`w-3 h-3 shrink-0 ${
+                          liveConflict ? 'text-rose-400 animate-pulse' : 'text-amber-400'
+                        }`}
+                      />
+                    </button>
+                  )}
 
                   {matchedProduct && isEditingThisChip ? (
                     <form
@@ -2405,9 +2493,25 @@ const StorefrontContent: React.FC = () => {
         products={products}
       />
       <SkuAuditLogModal
-        isOpen={!!safeModeAuditSku}
-        onClose={() => setSafeModeAuditSku(null)}
-        sku={safeModeAuditSku || undefined}
+        isOpen={Boolean(safeModeAuditSku || globalAuditLogTarget)}
+        onClose={() => {
+          setSafeModeAuditSku(null);
+          closeGlobalSkuAuditLog();
+        }}
+        sku={globalAuditLogTarget?.sku || safeModeAuditSku || undefined}
+        product={
+          globalAuditLogTarget?.product ||
+          (globalAuditLogTarget?.sku
+            ? products.find(
+                p => p.sku.toUpperCase() === globalAuditLogTarget.sku.toUpperCase()
+              ) || null
+            : safeModeAuditSku
+            ? products.find(
+                p => p.sku.toUpperCase() === safeModeAuditSku.toUpperCase()
+              ) || null
+            : null)
+        }
+        onOpenStockAdjust={(prod) => setSkuAdjustProduct(prod)}
       />
       <ProductDetailModal />
       <ProductQrCodeModal />

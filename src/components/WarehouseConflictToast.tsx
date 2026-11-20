@@ -19,6 +19,7 @@ import { WarehouseConflictEvent } from '../types';
 export const WarehouseConflictToast: React.FC = () => {
   const {
     warehouseConflicts,
+    highlightedConflictId,
     dismissWarehouseConflict,
     resolveWarehouseConflict,
     openAdminForProduct,
@@ -30,20 +31,32 @@ export const WarehouseConflictToast: React.FC = () => {
   return (
     <div
       id="warehouse-conflict-toast-container"
-      className="fixed top-4 right-4 z-70 flex flex-col gap-3 max-w-md w-full pointer-events-none"
+      className="fixed top-4 right-4 z-[70] flex flex-col gap-3 max-w-md w-full pointer-events-none"
     >
       <AnimatePresence>
         {warehouseConflicts.map((conflict: WarehouseConflictEvent) => {
           const targetProduct = products.find(p => p.sku === conflict.sku || p.id === conflict.productId);
+          const isHighlighted = highlightedConflictId === conflict.id;
+          const isTransitFocused =
+            conflict.userB?.role === 'Transit Delay Alert' ||
+            conflict.message.toLowerCase().includes('transit delay');
 
           return (
             <motion.div
               key={conflict.id}
               id={`warehouse-conflict-toast-${conflict.id}`}
               initial={{ opacity: 0, y: -20, scale: 0.95 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
+              animate={{
+                opacity: 1,
+                y: 0,
+                scale: isHighlighted ? 1.02 : 1
+              }}
               exit={{ opacity: 0, scale: 0.9, transition: { duration: 0.2 } }}
-              className="pointer-events-auto rounded-2xl p-4 sm:p-5 bg-neutral-950/95 border-2 border-amber-500/90 shadow-2xl shadow-amber-950/90 text-white backdrop-blur-md relative overflow-hidden space-y-3"
+              className={`pointer-events-auto rounded-2xl p-4 sm:p-5 bg-neutral-950/95 border-2 shadow-2xl text-white backdrop-blur-md relative overflow-hidden space-y-3 transition-all ${
+                isHighlighted
+                  ? 'border-amber-300 ring-2 ring-amber-400/70 shadow-amber-500/40'
+                  : 'border-amber-500/90 shadow-amber-950/90'
+              }`}
             >
               {/* Animated Warning Stripe Ambient Accent */}
               <div className="absolute -top-10 -right-10 w-32 h-32 bg-amber-500/20 rounded-full blur-2xl pointer-events-none" />
@@ -58,14 +71,16 @@ export const WarehouseConflictToast: React.FC = () => {
                   <div>
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold tracking-wider uppercase bg-amber-500/25 text-amber-300 border border-amber-500/50">
-                        Warehouse Conflict
+                        {isTransitFocused ? 'Transit & Stock Alert' : 'Warehouse Conflict'}
                       </span>
                       <span className="text-[10px] font-mono text-neutral-400">
                         {conflict.timestamp}
                       </span>
                     </div>
                     <h4 className="text-xs sm:text-sm font-bold text-white mt-0.5">
-                      Simultaneous Stock Edit Collision
+                      {isTransitFocused
+                        ? 'Transit Delay / Routing Conflict'
+                        : 'Simultaneous Stock Edit Collision'}
                     </h4>
                   </div>
                 </div>

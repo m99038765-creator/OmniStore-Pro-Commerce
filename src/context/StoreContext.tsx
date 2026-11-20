@@ -1,10 +1,20 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
-import { Product, CartItem, Order, RealtimeMessage, WarehouseStockMetrics, ShippingDetails, PaymentFormState, InventoryAlert, ProductReview, UserProfile, SavedAddress, CommunicationPreferences, SkuAuditLogEntry, SkuSafetyCheckResult, WarehouseConflictEvent } from '../types';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { Product, CartItem, Order, RealtimeMessage, WarehouseStockMetrics, ShippingDetails, PaymentFormState, InventoryAlert, ProductReview, UserProfile, SavedAddress, CommunicationPreferences, SkuAuditLogEntry, SkuSafetyCheckResult, WarehouseConflictEvent, AutoReplenishmentRule, AutoReplenishmentDraftPO, AutoRestockRequest, CapacityPeakRecord } from '../types';
 import { INITIAL_SAMPLE_ORDERS, createSampleOrder } from '../data/sampleOrders';
 import { INITIAL_USER_PROFILE } from '../data/initialUserProfile';
 import { INITIAL_SKU_AUDIT_LOGS } from '../data/initialAuditLogs';
-import { checkSkuAuditLogSafety } from '../utils/skuAuditSafety';
+import {
+  checkSkuAuditLogSafety,
+  isAuditEntryQuarantineOrDamaged,
+  isAuditEntryDamagedClearance,
+  isAuditEntryQuarantineClearance
+} from '../utils/skuAuditSafety';
 import { detectSkuRegionalConflict, SkuRegionalConflict } from '../utils/inventoryConflicts';
+import {
+  computeSku30DayCapacityMap,
+  Sku30DayCapacityMetrics,
+  updateRecorded30DayPeaks
+} from '../utils/autoRestockCapacity';
 
 let _globalIdCounter = 0;
 const _getUniqueId = (prefix = "id") => `${prefix}_${Date.now()}_${++_globalIdCounter}`;
@@ -14,6 +24,20 @@ export interface AlertToast {
   type: 'info' | 'warning' | 'critical' | 'success';
   title: string;
   message: string;
+  timestamp: string;
+}
+
+export interface FlaggedAuditAlert {
+  id: string;
+  auditEntryId: string;
+  sku: string;
+  productId?: string;
+  productName: string;
+  warehouse: string;
+  flagType: 'quarantine' | 'damaged' | 'both';
+  statusLabel: string;
+  reason: string;
+  operatorId: string;
   timestamp: string;
 }
 
@@ -76,7 +100,12 @@ interface StoreContextType {
   checkSkuSafety: (sku: string) => SkuSafetyCheckResult;
   toggleSkuDamagedFlag: (product: Product) => boolean;
   refreshWarehouseAuditLogs: () => Promise<SkuAuditLogEntry[]>;
-  clearSkuAuditFlags: (sku: string, auditorName?: string) => Promise<boolean>;
+  clearSkuAuditFlags: (sku: string, auditorName?: string, resolvedNote?: string) => Promise<boolean>;
+  flaggedAuditAlerts: FlaggedAuditAlert[];
+  dismissFlaggedAuditAlert: (id: string) => void;
+  globalAuditLogTarget: { sku: string; product?: Product | null } | null;
+  openGlobalSkuAuditLog: (sku: string, product?: Product | null) => void;
+  closeGlobalSkuAuditLog: () => void;
 
   // Customer Default Warehouse Selection & Transit
   customerDefaultWarehouse: string;
@@ -182,7 +211,17 @@ interface StoreContextType {
   setAdminTargetProductId: (id: string | null) => void;
   openAdminForProduct: (product: Product) => void;
   warehouseConflicts: WarehouseConflictEvent[];
+  highlightedConflictId: string | null;
   dismissWarehouseConflict: (id: string) => void;
+  focusOrOpenWarehouseConflictToast: (
+    product: Product,
+    context?: {
+      hasStockConflict?: boolean;
+      hasTransitDelay?: boolean;
+      transitDelayLabel?: string;
+      regionalConflictSummary?: string;
+    }
+  ) => void;
   resolveWarehouseConflict: (conflictId: string, resolution: 'override' | 'yield' | 'refresh') => Promise<void>;
   reportInventoryEditingSession: (sku: string, productId: string, status: 'start' | 'stop', action?: string) => Promise<void>;
   simulateWarehouseConflict: (sku?: string) => Promise<WarehouseConflictEvent | null>;
@@ -207,6 +246,60 @@ interface StoreContextType {
     auditNote: string;
     timestamp: string;
   }>;
+  executeStockRebalanceTransfers: (
+    transfers: {
+      productId: string;
+      sku: string;
+      productName: string;
+      sourceWarehouse: string;
+      destWarehouse: string;
+      quantity: number;
+      affectsPrimaryProductStock: 'inbound_restock' | 'reconcile_only';
+    }[]
+  ) => Promise<{
+    success: boolean;
+    executedCount: number;
+    totalUnitsTransferred: number;
+    timestamp: string;
+  }>;
+  autoReplenishmentRules: Record<string, AutoReplenishmentRule>;
+  autoReplenishmentDraftPOs: AutoReplenishmentDraftPO[];
+  setAutoReplenishmentRule: (
+    product: Product,
+    config: { enabled: boolean; targetStock: number; warehouse?: string }
+  ) => AutoReplenishmentDraftPO | null;
+  approveAutoReplenishmentDraftPO: (poId: string) => Promise<boolean>;
+  updateAutoReplenishmentDraftPOQty: (poId: string, newQuantity: number) => void;
+  dismissAutoReplenishmentDraftPO: (poId: string) => void;
+  batchDecommissionProducts: (
+    productIds: string[],
+    reason?: string
+  ) => Promise<{
+    success: boolean;
+    decommissionedCount: number;
+    decommissionedSkus: string[];
+    blockedProducts: { id: string; sku: string; name: string; stock: number }[];
+    error?: string;
+    timestamp: string;
+  }>;
+  // Batch Auto-Restock (<20% of 30-day max recorded capacity)
+  isBatchAutoRestockEnabled: boolean;
+  setBatchAutoRestockEnabled: (enabled: boolean) => void;
+  autoRestockRequests: AutoRestockRequest[];
+  sku30DayCapacityMap: Record<string, Sku30DayCapacityMetrics>;
+  fulfillAutoRestockRequest: (requestId: string) => Promise<boolean>;
+  fulfillAllPendingAutoRestockRequests: () => Promise<{ fulfilledCount: number; totalUnits: number }>;
+  updateAutoRestockRequestQty: (requestId: string, newQuantity: number) => void;
+  dismissAutoRestockRequest: (requestId: string) => void;
+  // Background WebSocket Auto-Sync (60s telemetry refresh for selected SKUs)
+  isAutoSyncEnabled: boolean;
+  setIsAutoSyncEnabled: (enabled: boolean) => void;
+  autoSyncStatus: 'idle' | 'connecting' | 'active' | 'reconnecting';
+  autoSyncLastRefreshedAt: string | null;
+  autoSyncNextRefreshAt: number | null;
+  autoSyncSyncedCount: number;
+  autoSyncScopedToSelection: boolean;
+  triggerAutoSyncNow: () => void;
 }
 
 const StoreContext = createContext<StoreContextType | null>(null);
@@ -297,6 +390,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [comparedProductIds, setComparedProductIds] = useState<string[]>([]);
   const [isCompareModalOpen, setIsCompareModalOpen] = useState(false);
   const [warehouseConflicts, setWarehouseConflicts] = useState<WarehouseConflictEvent[]>([]);
+  const [highlightedConflictId, setHighlightedConflictId] = useState<string | null>(null);
   const [chartDrilldownSku, setChartDrilldownSku] = useState<string | null>(null);
   const [resolvedRegionalConflictSkus, setResolvedRegionalConflictSkus] = useState<string[]>([]);
   const [selectedDiscrepancySkus, setSelectedDiscrepancySkus] = useState<string[]>([]);
@@ -354,42 +448,146 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
   const [warehouseAuditLogs, setWarehouseAuditLogs] = useState<SkuAuditLogEntry[]>(INITIAL_SKU_AUDIT_LOGS);
   const warehouseAuditLogsRef = useRef<SkuAuditLogEntry[]>(warehouseAuditLogs);
-  useEffect(() => {
-    warehouseAuditLogsRef.current = warehouseAuditLogs;
-  }, [warehouseAuditLogs]);
+  const seenAuditLogIdsRef = useRef<Set<string>>(
+    new Set(INITIAL_SKU_AUDIT_LOGS.map(l => l.id))
+  );
+  const [flaggedAuditAlerts, setFlaggedAuditAlerts] = useState<FlaggedAuditAlert[]>([]);
+  const [globalAuditLogTarget, setGlobalAuditLogTarget] = useState<{
+    sku: string;
+    product?: Product | null;
+  } | null>(null);
 
-  const refreshWarehouseAuditLogs = useCallback(async (): Promise<SkuAuditLogEntry[]> => {
-    try {
-      const res = await fetch('/api/inventory/audit-logs');
-      if (res.ok) {
-        const data = await res.json();
-        if (data && Array.isArray(data.logs) && data.logs.length > 0) {
-          const current = warehouseAuditLogsRef.current;
-          const byId = new Map<string, SkuAuditLogEntry>();
-          for (const entry of current) {
-            byId.set(entry.id, entry);
-          }
-          for (const entry of data.logs as SkuAuditLogEntry[]) {
-            byId.set(entry.id, entry);
-          }
-          const merged = Array.from(byId.values()).sort(
-            (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
-          );
-          warehouseAuditLogsRef.current = merged;
-          setWarehouseAuditLogs(merged);
-          return merged;
-        }
-      }
-    } catch {
-      // fallback to latest in-memory audit logs
-    }
-    return warehouseAuditLogsRef.current;
+  const openGlobalSkuAuditLog = useCallback((sku: string, product?: Product | null) => {
+    const cleanSku = sku.trim();
+    if (!cleanSku) return;
+    setGlobalAuditLogTarget({ sku: cleanSku, product: product || null });
   }, []);
 
-  // Sync full live audit logs from backend if available
+  const closeGlobalSkuAuditLog = useCallback(() => {
+    setGlobalAuditLogTarget(null);
+  }, []);
+
+  const dismissFlaggedAuditAlert = useCallback((id: string) => {
+    setFlaggedAuditAlerts(prev => prev.filter(a => a.id !== id));
+  }, []);
+
   useEffect(() => {
-    refreshWarehouseAuditLogs();
-  }, [refreshWarehouseAuditLogs]);
+    warehouseAuditLogsRef.current = warehouseAuditLogs;
+
+    // Detect newly added audit entries entering 'quarantine' or 'damage' status, or clearing them
+    const unseenEntries = warehouseAuditLogs.filter(
+      entry => !seenAuditLogIdsRef.current.has(entry.id)
+    );
+    if (unseenEntries.length === 0) return;
+
+    for (const entry of unseenEntries) {
+      seenAuditLogIdsRef.current.add(entry.id);
+    }
+
+    const newlyFlaggedAlerts: FlaggedAuditAlert[] = [];
+    const clearedSkus = new Set<string>();
+
+    // Evaluate chronologically so later clearance beats earlier flag in the same batch
+    const chronologicalUnseen = [...unseenEntries].sort(
+      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+    );
+
+    for (const entry of chronologicalUnseen) {
+      const normalizedSku = (entry.sku || '').trim().toUpperCase();
+      if (!normalizedSku) continue;
+
+      if (isAuditEntryDamagedClearance(entry) || isAuditEntryQuarantineClearance(entry)) {
+        const safetyNow = checkSkuAuditLogSafety(entry.sku, warehouseAuditLogs);
+        if (safetyNow.isSafe) {
+          clearedSkus.add(normalizedSku);
+        }
+        continue;
+      }
+
+      const flagCheck = isAuditEntryQuarantineOrDamaged(entry);
+      if (flagCheck.isFlagged && flagCheck.flagType) {
+        clearedSkus.delete(normalizedSku);
+        newlyFlaggedAlerts.push({
+          id: _getUniqueId('FLG-AUD'),
+          auditEntryId: entry.id,
+          sku: entry.sku,
+          productId: entry.productId,
+          productName: entry.productName || entry.sku,
+          warehouse: entry.warehouse || 'Bay Area Hub (WH-01)',
+          flagType: flagCheck.flagType,
+          statusLabel: flagCheck.statusLabel,
+          reason: entry.reason || flagCheck.statusLabel,
+          operatorId: entry.operatorId || 'Warehouse Audit System',
+          timestamp: new Date(entry.timestamp).toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit'
+          })
+        });
+      }
+    }
+
+    if (clearedSkus.size > 0 || newlyFlaggedAlerts.length > 0) {
+      setFlaggedAuditAlerts(prev => {
+        let next = prev.filter(
+          a => !clearedSkus.has(a.sku.trim().toUpperCase())
+        );
+
+        for (const fresh of newlyFlaggedAlerts) {
+          const freshNorm = fresh.sku.trim().toUpperCase();
+          next = [
+            fresh,
+            ...next.filter(a => a.sku.trim().toUpperCase() !== freshNorm)
+          ];
+        }
+        return next.slice(0, 6);
+      });
+    }
+  }, [warehouseAuditLogs]);
+
+  const syncAuditLogsFromServer = useCallback(
+    async (options?: { silentBaseline?: boolean }): Promise<SkuAuditLogEntry[]> => {
+      try {
+        const res = await fetch('/api/inventory/audit-logs');
+        if (res.ok) {
+          const data = await res.json();
+          if (data && Array.isArray(data.logs) && data.logs.length > 0) {
+            const current = warehouseAuditLogsRef.current;
+            const byId = new Map<string, SkuAuditLogEntry>();
+            for (const entry of current) {
+              byId.set(entry.id, entry);
+            }
+            for (const entry of data.logs as SkuAuditLogEntry[]) {
+              if (options?.silentBaseline) {
+                seenAuditLogIdsRef.current.add(entry.id);
+              }
+              byId.set(entry.id, entry);
+            }
+            const merged = Array.from(byId.values()).sort(
+              (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+            );
+            warehouseAuditLogsRef.current = merged;
+            setWarehouseAuditLogs(merged);
+            return merged;
+          }
+        }
+      } catch {
+        // fallback to latest in-memory audit logs
+      }
+      return warehouseAuditLogsRef.current;
+    },
+    []
+  );
+
+  const refreshWarehouseAuditLogs = useCallback(
+    () => syncAuditLogsFromServer({ silentBaseline: false }),
+    [syncAuditLogsFromServer]
+  );
+
+  // Sync full live audit logs from backend on initial mount without firing alerts for historical seed entries
+  useEffect(() => {
+    syncAuditLogsFromServer({ silentBaseline: true });
+  }, [syncAuditLogsFromServer]);
 
   const checkSkuSafety = useCallback((sku: string): SkuSafetyCheckResult => {
     return checkSkuAuditLogSafety(sku, warehouseAuditLogs);
@@ -566,7 +764,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     return nextIsDamaged;
   }, [warehouseAuditLogs, userProfile, addAlert]);
 
-  const clearSkuAuditFlags = useCallback(async (sku: string, auditorName?: string): Promise<boolean> => {
+  const clearSkuAuditFlags = useCallback(async (sku: string, auditorName?: string, resolvedNote?: string): Promise<boolean> => {
     const normalizedSku = sku.trim().toUpperCase();
     if (!normalizedSku) return false;
 
@@ -577,7 +775,14 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       return Number.isFinite(ts) && ts > max ? ts : max;
     }, 0);
     const nextTimestamp = new Date(Math.max(Date.now(), latestTs + 1000)).toISOString();
-    const resolvedAuditor = auditorName || userProfile?.displayName || 'Sora Tanaka (QA Auditor)';
+    const resolvedAuditor = auditorName?.trim() || userProfile?.displayName || 'Sora Tanaka (QA Auditor)';
+
+    const trimmedNote = resolvedNote?.trim();
+    const formattedNote = trimmedNote
+      ? trimmedNote.toLowerCase().startsWith('resolved')
+        ? trimmedNote
+        : `Resolved: ${trimmedNote}`
+      : 'Resolved: Cleared by manager — Quarantine and Damaged flags verified resolved; audit status updated to Cleared.';
 
     const clearanceEntry: SkuAuditLogEntry = {
       id: _getUniqueId('AUD-CLR'),
@@ -589,11 +794,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       adjustmentType: 'reconciliation',
       previousStock: matchedProduct?.stock ?? 0,
       newStock: matchedProduct?.stock ?? 0,
-      operatorId: `AUD-QA (${resolvedAuditor})`,
+      operatorId: `OP-MGR (${resolvedAuditor})`,
       operatorName: resolvedAuditor,
-      reason: 'Auditor Clearance: Quarantine & Damaged Flags Cleared',
+      reason: 'Audit Status: Cleared — Quarantine & Damaged Flags Cleared (Resolved)',
       warehouse: matchedProduct?.warehouse || 'Bay Area Hub (WH-01)',
-      notes: 'Cleared by auditor — Quarantine and Damaged flags verified resolved; SKU released for catalog display.'
+      notes: formattedNote
     };
 
     try {
@@ -842,7 +1047,101 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
   const dismissWarehouseConflict = useCallback((id: string) => {
     setWarehouseConflicts(prev => prev.filter(c => c.id !== id));
+    setHighlightedConflictId(prev => (prev === id ? null : prev));
   }, []);
+
+  const focusOrOpenWarehouseConflictToast = useCallback(
+    (
+      product: Product,
+      context?: {
+        hasStockConflict?: boolean;
+        hasTransitDelay?: boolean;
+        transitDelayLabel?: string;
+        regionalConflictSummary?: string;
+      }
+    ) => {
+      const normalizedSku = product.sku.trim().toUpperCase();
+      let targetId: string | null = null;
+
+      setWarehouseConflicts(prev => {
+        const existingIndex = prev.findIndex(
+          c => c.sku.trim().toUpperCase() === normalizedSku || c.productId === product.id
+        );
+
+        if (existingIndex >= 0) {
+          const existing = prev[existingIndex];
+          targetId = existing.id;
+          return [existing, ...prev.filter((_, idx) => idx !== existingIndex)];
+        }
+
+        const nowLabel = new Date().toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit'
+        });
+
+        const hasStockConflict = Boolean(context?.hasStockConflict);
+        const hasTransitDelay = Boolean(context?.hasTransitDelay);
+        const operatorName = userProfile?.displayName || 'Warehouse Manager';
+
+        let message = '';
+        if (hasStockConflict && hasTransitDelay) {
+          message = `${product.sku} (${product.name}) has an active warehouse stock conflict (${
+            context?.regionalConflictSummary || 'multi-hub ledger discrepancy'
+          }) combined with a transit delay (${
+            context?.transitDelayLabel || 'extended inter-hub routing'
+          }). Sync or inspect stock before dispatching.`;
+        } else if (hasStockConflict) {
+          message = `${product.sku} (${product.name}) is flagged for a warehouse stock conflict: ${
+            context?.regionalConflictSummary || 'conflicting stock counts reported across regional hubs'
+          }. Review and reconcile before committing adjustments.`;
+        } else {
+          message = `${product.sku} (${product.name}) is flagged for a transit delay (${
+            context?.transitDelayLabel || 'extended cross-hub transit window'
+          }) from ${product.warehouse}. Verify hub allocation or sync inventory levels.`;
+        }
+
+        const newConflict: WarehouseConflictEvent = {
+          id: _getUniqueId('CONF-CHIP'),
+          sku: product.sku,
+          productId: product.id,
+          productName: product.name,
+          productImage: product.images?.[0],
+          warehouse: product.warehouse,
+          userA: {
+            operatorId: 'OP-CONSOLE',
+            operatorName,
+            role: 'Active Console Manager'
+          },
+          userB: {
+            operatorId: hasStockConflict ? 'HUB-SYNC-BOT' : 'CARRIER-SLA',
+            operatorName: hasStockConflict
+              ? 'Regional Hub Ledger Sync'
+              : 'Transit Dispatch Monitor',
+            role: hasStockConflict ? 'Cross-Hub Conflict' : 'Transit Delay Alert'
+          },
+          timestamp: nowLabel,
+          message,
+          currentStock: product.stock,
+          attemptedAction: hasStockConflict ? 'stock_adjustment' : 'cycle_count'
+        };
+
+        targetId = newConflict.id;
+        return [newConflict, ...prev];
+      });
+
+      // Defer highlight assignment so React commits the new/promoted conflict ID cleanly
+      setTimeout(() => {
+        if (targetId) {
+          setHighlightedConflictId(targetId);
+          setTimeout(() => {
+            setHighlightedConflictId(prev => (prev === targetId ? null : prev));
+          }, 3500);
+        }
+      }, 0);
+    },
+    [userProfile]
+  );
 
   const resolveWarehouseConflict = useCallback(async (conflictId: string, resolution: 'override' | 'yield' | 'refresh') => {
     try {
@@ -1107,6 +1406,152 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         reconciledCount: normalizedSkus.length,
         skus: newEntries.map((e) => e.sku),
         auditNote: cleanNote,
+        timestamp: nowIso
+      };
+    },
+    [products, userProfile, addAlert]
+  );
+
+  const executeStockRebalanceTransfers = useCallback(
+    async (
+      transfers: {
+        productId: string;
+        sku: string;
+        productName: string;
+        sourceWarehouse: string;
+        destWarehouse: string;
+        quantity: number;
+        affectsPrimaryProductStock: 'inbound_restock' | 'reconcile_only';
+      }[]
+    ): Promise<{
+      success: boolean;
+      executedCount: number;
+      totalUnitsTransferred: number;
+      timestamp: string;
+    }> => {
+      const valid = transfers.filter((t) => t.quantity > 0);
+      const nowIso = new Date().toISOString();
+      if (valid.length === 0) {
+        return {
+          success: false,
+          executedCount: 0,
+          totalUnitsTransferred: 0,
+          timestamp: nowIso
+        };
+      }
+
+      const operatorName = userProfile?.displayName || 'Warehouse Manager';
+      const currentLogs = warehouseAuditLogsRef.current;
+      const latestTs = currentLogs.reduce((max, log) => {
+        const ts = new Date(log.timestamp).getTime();
+        return Number.isFinite(ts) && ts > max ? ts : max;
+      }, 0);
+      const baseMs = Math.max(Date.now(), latestTs + 1000);
+
+      const totalUnitsTransferred = valid.reduce((acc, t) => acc + t.quantity, 0);
+      const normalizedSkus = Array.from(
+        new Set(valid.map((t) => t.sku.trim().toUpperCase()))
+      );
+
+      // Update local product stock for transfers bringing units into a deficit primary warehouse
+      const inboundByProductId: Record<string, number> = {};
+      valid.forEach((t) => {
+        if (t.affectsPrimaryProductStock === 'inbound_restock') {
+          inboundByProductId[t.productId] =
+            (inboundByProductId[t.productId] || 0) + t.quantity;
+        }
+      });
+
+      const auditEntries: SkuAuditLogEntry[] = valid.map((t, idx) => {
+        const matched = products.find((p) => p.id === t.productId);
+        const prevStock = matched?.stock ?? 0;
+        const delta =
+          t.affectsPrimaryProductStock === 'inbound_restock' ? t.quantity : 0;
+        const nextStock = prevStock + delta;
+
+        return {
+          id: _getUniqueId('AUD-REB'),
+          sku: t.sku,
+          productId: t.productId,
+          productName: t.productName,
+          timestamp: new Date(baseMs + idx * 400).toISOString(),
+          adjustmentValue: delta,
+          adjustmentType: delta > 0 ? 'restock' : 'reconciliation',
+          previousStock: prevStock,
+          newStock: nextStock,
+          operatorId: `OP-MGR (${operatorName})`,
+          operatorName,
+          reason: `Automated Stock Rebalance — Inter-Warehouse Transfer (${t.quantity}u)`,
+          warehouse: t.destWarehouse,
+          notes: `Transferred ${t.quantity} unit(s) from ${t.sourceWarehouse} to ${t.destWarehouse} to normalize regional inventory levels.`
+        };
+      });
+
+      // Apply inbound restocks to backend (best-effort) and local state
+      await Promise.allSettled([
+        ...Object.entries(inboundByProductId).map(([productId, qty]) =>
+          fetch('/api/inventory/restock', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ productId, quantity: qty })
+          })
+        ),
+        ...auditEntries.map((entry) =>
+          fetch('/api/inventory/audit-logs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sku: entry.sku,
+              productName: entry.productName,
+              adjustmentValue: entry.adjustmentValue,
+              adjustmentType: entry.adjustmentType,
+              previousStock: entry.previousStock,
+              newStock: entry.newStock,
+              operatorId: entry.operatorId,
+              operatorName: entry.operatorName,
+              reason: entry.reason,
+              warehouse: entry.warehouse,
+              notes: entry.notes
+            })
+          })
+        )
+      ]);
+
+      if (Object.keys(inboundByProductId).length > 0) {
+        setProducts((prev) =>
+          prev.map((p) =>
+            inboundByProductId[p.id]
+              ? { ...p, stock: p.stock + inboundByProductId[p.id] }
+              : p
+          )
+        );
+      }
+
+      setWarehouseAuditLogs((prev) => {
+        const next = [...auditEntries, ...prev];
+        warehouseAuditLogsRef.current = next;
+        return next;
+      });
+
+      setResolvedRegionalConflictSkus((prev) =>
+        Array.from(new Set([...prev, ...normalizedSkus]))
+      );
+      setWarehouseConflicts((prev) =>
+        prev.filter((c) => !normalizedSkus.includes(c.sku.trim().toUpperCase()))
+      );
+
+      addAlert(
+        'success',
+        'Automated Stock Rebalance Dispatched',
+        `Executed ${valid.length} inter-warehouse transfer${
+          valid.length === 1 ? '' : 's'
+        } (${totalUnitsTransferred} total units) to normalize regional stock levels.`
+      );
+
+      return {
+        success: true,
+        executedCount: valid.length,
+        totalUnitsTransferred,
         timestamp: nowIso
       };
     },
@@ -1799,6 +2244,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         `Successfully updated stock for ${data.updatedCount || params.productIds.length} SKUs (${actionText}). Real-time warehouse telemetry broadcasted!`
       );
 
+      // Refresh live audit logs so any Quarantine or Damage adjustment immediately triggers the persistent Flagged Audit Alert toast
+      void refreshWarehouseAuditLogs();
+
       return {
         success: true,
         updatedCount: data.updatedCount || params.productIds.length,
@@ -1884,11 +2332,1250 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ productId })
       });
-      return res.ok;
+      if (res.ok) {
+        try {
+          const data = await res.json();
+          if (data?.product?.id && typeof data.product.stock === 'number') {
+            setProducts(prev =>
+              prev.map(p =>
+                p.id === data.product.id
+                  ? { ...p, stock: data.product.stock, reserved: data.product.reserved ?? p.reserved }
+                  : p
+              )
+            );
+          }
+        } catch {
+          // WebSocket broadcast will still update stock
+        }
+        return true;
+      }
+      return false;
     } catch {
       return false;
     }
   };
+
+  // Auto-Replenishment Rules & Automatic Draft Purchase Orders
+  const [autoReplenishmentRules, setAutoReplenishmentRules] = useState<
+    Record<string, AutoReplenishmentRule>
+  >(() => {
+    try {
+      const saved = localStorage.getItem('omnistore_auto_replenishment_rules');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  const [autoReplenishmentDraftPOs, setAutoReplenishmentDraftPOs] = useState<
+    AutoReplenishmentDraftPO[]
+  >(() => {
+    try {
+      const saved = localStorage.getItem('omnistore_auto_replenishment_draft_pos');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const autoReplenishmentDraftPOsRef = useRef<AutoReplenishmentDraftPO[]>(autoReplenishmentDraftPOs);
+  useEffect(() => {
+    autoReplenishmentDraftPOsRef.current = autoReplenishmentDraftPOs;
+    try {
+      localStorage.setItem(
+        'omnistore_auto_replenishment_draft_pos',
+        JSON.stringify(autoReplenishmentDraftPOs)
+      );
+    } catch {
+      // ignore storage quota errors
+    }
+  }, [autoReplenishmentDraftPOs]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        'omnistore_auto_replenishment_rules',
+        JSON.stringify(autoReplenishmentRules)
+      );
+    } catch {
+      // ignore storage quota errors
+    }
+  }, [autoReplenishmentRules]);
+
+  // Tracks dismissed threshold signatures so a dismissed draft won't re-spawn until stock drops further or target increases
+  const dismissedAutoPoSigRef = useRef<Record<string, string>>({});
+
+  const createDraftPOObject = useCallback(
+    (
+      product: Product,
+      targetStock: number,
+      warehouse: string,
+      triggerSource: AutoReplenishmentDraftPO['triggerSource']
+    ): AutoReplenishmentDraftPO => {
+      const orderQuantity = Math.max(1, targetStock - product.stock);
+      const unitWholesaleCost = Math.max(1, Math.round(product.price * 0.62));
+      const poSuffix = Math.floor(1000 + Math.random() * 9000);
+      return {
+        id: _getUniqueId('AUTO-PO'),
+        poNumber: `PO-AUTO-${poSuffix}`,
+        productId: product.id,
+        sku: product.sku,
+        productName: product.name,
+        productImage: product.images?.[0] || '',
+        warehouse,
+        currentStockAtTrigger: product.stock,
+        targetStock,
+        orderQuantity,
+        unitWholesaleCost,
+        estimatedTotalCost: orderQuantity * unitWholesaleCost,
+        status: 'draft',
+        triggerSource,
+        createdAt: new Date().toISOString()
+      };
+    },
+    []
+  );
+
+  const appendAutoReplenishAuditEntry = useCallback(
+    (
+      product: Product,
+      reason: string,
+      notes: string,
+      adjustmentValue = 0,
+      previousStock = product.stock,
+      newStock = product.stock,
+      adjustmentType: SkuAuditLogEntry['adjustmentType'] = 'reconciliation',
+      warehouseOverride?: string
+    ) => {
+      const operatorName = userProfile?.displayName || 'Auto-Replenishment Engine';
+      const entry: SkuAuditLogEntry = {
+        id: _getUniqueId('AUD-AUTO'),
+        sku: product.sku,
+        productId: product.id,
+        productName: product.name,
+        timestamp: new Date().toISOString(),
+        adjustmentValue,
+        adjustmentType,
+        previousStock,
+        newStock,
+        operatorId: `AUTO-PO (${operatorName})`,
+        operatorName,
+        reason,
+        warehouse: warehouseOverride || product.warehouse,
+        notes
+      };
+
+      setWarehouseAuditLogs(prev => {
+        const next = [entry, ...prev];
+        warehouseAuditLogsRef.current = next;
+        return next;
+      });
+
+      fetch('/api/inventory/audit-logs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sku: entry.sku,
+          productName: entry.productName,
+          adjustmentValue: entry.adjustmentValue,
+          adjustmentType: entry.adjustmentType,
+          previousStock: entry.previousStock,
+          newStock: entry.newStock,
+          operatorId: entry.operatorId,
+          operatorName: entry.operatorName,
+          reason: entry.reason,
+          warehouse: entry.warehouse,
+          notes: entry.notes
+        })
+      }).catch(() => {
+        // best-effort backend audit persistence
+      });
+    },
+    [userProfile]
+  );
+
+  // Reactive watcher: triggers automatic draft POs whenever live stock drops below an active rule's target stock
+  useEffect(() => {
+    if (products.length === 0) return;
+    const activeRules = (Object.values(autoReplenishmentRules) as AutoReplenishmentRule[]).filter(r => r.enabled);
+    if (activeRules.length === 0) return;
+
+    const currentDrafts = autoReplenishmentDraftPOsRef.current;
+    const newlyCreated: AutoReplenishmentDraftPO[] = [];
+    const updatedDraftMap = new Map<string, AutoReplenishmentDraftPO>();
+
+    for (const rule of activeRules) {
+      const prod = products.find(p => p.id === rule.productId);
+      if (!prod) continue;
+
+      if (prod.stock < rule.targetStock) {
+        const sig = `${prod.stock}:${rule.targetStock}`;
+        const existingDraft = currentDrafts.find(
+          po => po.productId === prod.id && po.status === 'draft'
+        );
+
+        if (!existingDraft) {
+          if (dismissedAutoPoSigRef.current[prod.id] === sig) {
+            continue;
+          }
+          const draft = createDraftPOObject(
+            prod,
+            rule.targetStock,
+            rule.warehouse || prod.warehouse,
+            'stock_drop'
+          );
+          newlyCreated.push(draft);
+
+          appendAutoReplenishAuditEntry(
+            prod,
+            `Auto-Replenishment Draft PO Triggered (${draft.poNumber})`,
+            `Stock (${prod.stock}) fell below target threshold (${rule.targetStock}). Draft PO for +${draft.orderQuantity} units generated automatically for ${draft.warehouse}.`,
+            0,
+            prod.stock,
+            prod.stock,
+            'reconciliation',
+            draft.warehouse
+          );
+
+          addAlert(
+            'warning',
+            `Draft PO Triggered: ${draft.poNumber}`,
+            `${prod.sku} stock (${prod.stock}) dropped below target (${rule.targetStock}). Auto-drafted PO for +${draft.orderQuantity} units.`
+          );
+        } else {
+          // Keep open draft PO synced if stock drops further below target
+          const neededQty = Math.max(1, rule.targetStock - prod.stock);
+          if (
+            prod.stock < existingDraft.currentStockAtTrigger ||
+            existingDraft.targetStock !== rule.targetStock
+          ) {
+            updatedDraftMap.set(existingDraft.id, {
+              ...existingDraft,
+              currentStockAtTrigger: prod.stock,
+              targetStock: rule.targetStock,
+              orderQuantity: neededQty,
+              estimatedTotalCost: neededQty * existingDraft.unitWholesaleCost
+            });
+          }
+        }
+      } else {
+        // Stock recovered above threshold: clear any prior dismissal signature so future drops re-trigger cleanly
+        if (dismissedAutoPoSigRef.current[prod.id]) {
+          delete dismissedAutoPoSigRef.current[prod.id];
+        }
+      }
+    }
+
+    if (newlyCreated.length > 0 || updatedDraftMap.size > 0) {
+      setAutoReplenishmentDraftPOs(prev => {
+        const mapped = prev.map(po => updatedDraftMap.get(po.id) || po);
+        return [...newlyCreated, ...mapped];
+      });
+    }
+  }, [
+    products,
+    autoReplenishmentRules,
+    createDraftPOObject,
+    appendAutoReplenishAuditEntry,
+    addAlert
+  ]);
+
+  const setAutoReplenishmentRule = useCallback(
+    (
+      product: Product,
+      config: { enabled: boolean; targetStock: number; warehouse?: string }
+    ): AutoReplenishmentDraftPO | null => {
+      const liveProduct = products.find(p => p.id === product.id) || product;
+      const sanitizedTarget = Math.max(1, Math.min(9999, Math.round(config.targetStock)));
+      const warehouse = config.warehouse || liveProduct.warehouse;
+
+      const updatedRule: AutoReplenishmentRule = {
+        productId: liveProduct.id,
+        sku: liveProduct.sku,
+        productName: liveProduct.name,
+        warehouse,
+        enabled: config.enabled,
+        targetStock: sanitizedTarget,
+        updatedAt: new Date().toISOString()
+      };
+
+      // Clear any previous dismissal signature when user explicitly updates/enables the rule
+      if (config.enabled) {
+        delete dismissedAutoPoSigRef.current[liveProduct.id];
+      }
+
+      setAutoReplenishmentRules(prev => ({
+        ...prev,
+        [liveProduct.id]: updatedRule
+      }));
+
+      if (!config.enabled) {
+        addAlert(
+          'info',
+          'Auto-Replenishment Paused',
+          `Automatic draft PO generation disabled for ${liveProduct.sku}.`
+        );
+        return null;
+      }
+
+      // Immediately trigger or sync draft PO if current stock is already below target
+      if (liveProduct.stock < sanitizedTarget) {
+        const existingDraft = autoReplenishmentDraftPOsRef.current.find(
+          po => po.productId === liveProduct.id && po.status === 'draft'
+        );
+
+        if (existingDraft) {
+          const neededQty = Math.max(1, sanitizedTarget - liveProduct.stock);
+          const updatedPo: AutoReplenishmentDraftPO = {
+            ...existingDraft,
+            warehouse,
+            currentStockAtTrigger: liveProduct.stock,
+            targetStock: sanitizedTarget,
+            orderQuantity: neededQty,
+            estimatedTotalCost: neededQty * existingDraft.unitWholesaleCost
+          };
+          setAutoReplenishmentDraftPOs(prev => {
+            const next = prev.map(po => (po.id === existingDraft.id ? updatedPo : po));
+            autoReplenishmentDraftPOsRef.current = next;
+            return next;
+          });
+          addAlert(
+            'warning',
+            `Draft PO Updated: ${updatedPo.poNumber}`,
+            `${liveProduct.sku} target set to ${sanitizedTarget} units (current: ${liveProduct.stock}). Draft PO adjusted to +${neededQty} units.`
+          );
+          return updatedPo;
+        }
+
+        const draft = createDraftPOObject(
+          liveProduct,
+          sanitizedTarget,
+          warehouse,
+          'threshold_configured'
+        );
+        setAutoReplenishmentDraftPOs(prev => {
+          const next = [draft, ...prev];
+          autoReplenishmentDraftPOsRef.current = next;
+          return next;
+        });
+
+        appendAutoReplenishAuditEntry(
+          liveProduct,
+          `Auto-Replenishment Draft PO Triggered (${draft.poNumber})`,
+          `Auto-Replenishment enabled with target stock ${sanitizedTarget} (current: ${liveProduct.stock}). Draft PO for +${draft.orderQuantity} units generated for ${warehouse}.`,
+          0,
+          liveProduct.stock,
+          liveProduct.stock,
+          'reconciliation',
+          warehouse
+        );
+
+        addAlert(
+          'warning',
+          `Auto-Replenishment Triggered: ${draft.poNumber}`,
+          `Stock (${liveProduct.stock}) is below target (${sanitizedTarget}). Created draft PO for +${draft.orderQuantity} units of ${liveProduct.sku}.`
+        );
+        return draft;
+      }
+
+      addAlert(
+        'success',
+        'Auto-Replenishment Enabled',
+        `Monitoring ${liveProduct.sku}: automatic draft PO will trigger if stock drops below ${sanitizedTarget} units.`
+      );
+      return null;
+    },
+    [products, createDraftPOObject, appendAutoReplenishAuditEntry, addAlert]
+  );
+
+  const updateAutoReplenishmentDraftPOQty = useCallback(
+    (poId: string, newQuantity: number) => {
+      const clampedQty = Math.max(1, Math.min(9999, Math.round(newQuantity)));
+      setAutoReplenishmentDraftPOs(prev =>
+        prev.map(po =>
+          po.id === poId && po.status === 'draft'
+            ? {
+                ...po,
+                orderQuantity: clampedQty,
+                estimatedTotalCost: clampedQty * po.unitWholesaleCost
+              }
+            : po
+        )
+      );
+    },
+    []
+  );
+
+  const dismissAutoReplenishmentDraftPO = useCallback(
+    (poId: string) => {
+      const targetPo = autoReplenishmentDraftPOsRef.current.find(po => po.id === poId);
+      if (targetPo) {
+        const liveProd = products.find(p => p.id === targetPo.productId);
+        const currentStock = liveProd ? liveProd.stock : targetPo.currentStockAtTrigger;
+        dismissedAutoPoSigRef.current[targetPo.productId] = `${currentStock}:${targetPo.targetStock}`;
+      }
+
+      setAutoReplenishmentDraftPOs(prev =>
+        prev.map(po => (po.id === poId ? { ...po, status: 'dismissed' } : po))
+      );
+
+      if (targetPo) {
+        addAlert(
+          'info',
+          'Draft PO Dismissed',
+          `${targetPo.poNumber} for ${targetPo.sku} was dismissed. Future drops below target will create a fresh draft.`
+        );
+      }
+    },
+    [products, addAlert]
+  );
+
+  const approveAutoReplenishmentDraftPO = useCallback(
+    async (poId: string): Promise<boolean> => {
+      const targetPo = autoReplenishmentDraftPOsRef.current.find(
+        po => po.id === poId && po.status === 'draft'
+      );
+      if (!targetPo) return false;
+
+      const liveProd = products.find(p => p.id === targetPo.productId);
+      const prevStock = liveProd?.stock ?? targetPo.currentStockAtTrigger;
+      let resolvedNewStock = prevStock + targetPo.orderQuantity;
+
+      try {
+        const res = await fetch('/api/inventory/restock', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            productId: targetPo.productId,
+            quantity: targetPo.orderQuantity
+          })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.product && typeof data.product.stock === 'number') {
+            resolvedNewStock = data.product.stock;
+          }
+          setProducts(prev =>
+            prev.map(p =>
+              p.id === targetPo.productId ? { ...p, stock: resolvedNewStock } : p
+            )
+          );
+        } else {
+          await restockProduct(targetPo.productId, targetPo.orderQuantity);
+        }
+      } catch {
+        await restockProduct(targetPo.productId, targetPo.orderQuantity);
+      }
+
+      const nowIso = new Date().toISOString();
+      setAutoReplenishmentDraftPOs(prev =>
+        prev.map(po =>
+          po.id === poId
+            ? { ...po, status: 'approved', approvedAt: nowIso }
+            : po
+        )
+      );
+
+      if (liveProd) {
+        appendAutoReplenishAuditEntry(
+          liveProd,
+          `Auto-Replenishment PO Approved (${targetPo.poNumber})`,
+          `Approved draft purchase order ${targetPo.poNumber}: replenished +${targetPo.orderQuantity} units to ${targetPo.warehouse} (Stock: ${prevStock} -> ${resolvedNewStock}, Target: ${targetPo.targetStock}).`,
+          targetPo.orderQuantity,
+          prevStock,
+          resolvedNewStock,
+          'restock',
+          targetPo.warehouse
+        );
+      }
+
+      addAlert(
+        'success',
+        `Purchase Order Approved: ${targetPo.poNumber}`,
+        `Restocked +${targetPo.orderQuantity} units of ${targetPo.sku} (${prevStock} → ${resolvedNewStock} units).`
+      );
+      return true;
+    },
+    [products, restockProduct, appendAutoReplenishAuditEntry, addAlert]
+  );
+
+  // Batch Auto-Restock Engine (<20% of maximum recorded capacity over the last 30 days)
+  const [isBatchAutoRestockEnabled, setIsBatchAutoRestockEnabledState] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('omnistore_batch_auto_restock_enabled');
+      return saved ? JSON.parse(saved) : false;
+    } catch {
+      return false;
+    }
+  });
+
+  const [recorded30dPeakCapacity, setRecorded30dPeakCapacity] = useState<
+    Record<string, CapacityPeakRecord[]>
+  >(() => {
+    try {
+      const saved = localStorage.getItem('omnistore_30d_capacity_peaks');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  const [autoRestockRequests, setAutoRestockRequests] = useState<AutoRestockRequest[]>(() => {
+    try {
+      const saved = localStorage.getItem('omnistore_auto_restock_requests');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const autoRestockRequestsRef = useRef<AutoRestockRequest[]>(autoRestockRequests);
+  const dismissedAutoRestockSigRef = useRef<Record<string, string>>({});
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        'omnistore_batch_auto_restock_enabled',
+        JSON.stringify(isBatchAutoRestockEnabled)
+      );
+    } catch {
+      // ignore storage quota errors
+    }
+  }, [isBatchAutoRestockEnabled]);
+
+  useEffect(() => {
+    autoRestockRequestsRef.current = autoRestockRequests;
+    try {
+      localStorage.setItem(
+        'omnistore_auto_restock_requests',
+        JSON.stringify(autoRestockRequests)
+      );
+    } catch {
+      // ignore storage quota errors
+    }
+  }, [autoRestockRequests]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        'omnistore_30d_capacity_peaks',
+        JSON.stringify(recorded30dPeakCapacity)
+      );
+    } catch {
+      // ignore storage quota errors
+    }
+  }, [recorded30dPeakCapacity]);
+
+  // Continuously record live stock high-water marks within the rolling 30-day window
+  useEffect(() => {
+    if (products.length === 0) return;
+    setRecorded30dPeakCapacity(prev => {
+      const { next, changed } = updateRecorded30DayPeaks(prev, products);
+      return changed ? next : prev;
+    });
+  }, [products]);
+
+  const sku30DayCapacityMap = useMemo(
+    () =>
+      computeSku30DayCapacityMap(
+        products,
+        orders,
+        warehouseAuditLogs,
+        recorded30dPeakCapacity
+      ),
+    [products, orders, warehouseAuditLogs, recorded30dPeakCapacity]
+  );
+
+  // Reactive watcher: when Auto-Restock is ON, automatically generates restock requests
+  // whenever any SKU falls below 20% of its maximum recorded capacity for the last 30 days
+  useEffect(() => {
+    if (!isBatchAutoRestockEnabled || products.length === 0) return;
+
+    const currentRequests = autoRestockRequestsRef.current;
+    const newlyGenerated: AutoRestockRequest[] = [];
+    const updatedMap = new Map<string, AutoRestockRequest>();
+
+    for (const product of products) {
+      const cap = sku30DayCapacityMap[product.id];
+      if (!cap) continue;
+
+      if (cap.isBelow20Pct) {
+        const sig = `${product.stock}:${cap.maxCapacity30d}`;
+        const existingPending = currentRequests.find(
+          req => req.productId === product.id && req.status === 'pending'
+        );
+
+        if (!existingPending) {
+          if (dismissedAutoRestockSigRef.current[product.id] === sig) {
+            continue;
+          }
+
+          const unitWholesaleCost = Math.max(1, Math.round(product.price * 0.62));
+          const reqSuffix = Math.floor(1000 + Math.random() * 9000);
+          const triggerReason = `Stock (${product.stock}u) fell below 20% of 30-day max capacity (${cap.maxCapacity30d}u · ${cap.capacityRatioPercent.toFixed(1)}%)`;
+
+          const newReq: AutoRestockRequest = {
+            id: _getUniqueId('AUTO-RST'),
+            requestNumber: `RST-AUTO-${reqSuffix}`,
+            productId: product.id,
+            sku: product.sku,
+            productName: product.name,
+            productImage: product.images?.[0] || '',
+            warehouse: product.warehouse,
+            currentStock: product.stock,
+            maxCapacity30d: cap.maxCapacity30d,
+            capacityRatioPercent: cap.capacityRatioPercent,
+            thresholdUnits20Pct: cap.thresholdUnits20Pct,
+            requestedQuantity: cap.recommendedRestockQty,
+            unitWholesaleCost,
+            estimatedCost: cap.recommendedRestockQty * unitWholesaleCost,
+            status: 'pending',
+            triggerReason,
+            createdAt: new Date().toISOString()
+          };
+
+          newlyGenerated.push(newReq);
+
+          appendAutoReplenishAuditEntry(
+            product,
+            `Auto-Restock Request Generated (${newReq.requestNumber})`,
+            `${triggerReason}. Auto-generated restock request for +${newReq.requestedQuantity} units to restore capacity.`,
+            0,
+            product.stock,
+            product.stock,
+            'reconciliation',
+            product.warehouse
+          );
+        } else if (
+          existingPending.currentStock !== product.stock ||
+          existingPending.maxCapacity30d !== cap.maxCapacity30d
+        ) {
+          const nextQty = Math.max(existingPending.requestedQuantity, cap.recommendedRestockQty);
+          updatedMap.set(existingPending.id, {
+            ...existingPending,
+            currentStock: product.stock,
+            maxCapacity30d: cap.maxCapacity30d,
+            capacityRatioPercent: cap.capacityRatioPercent,
+            thresholdUnits20Pct: cap.thresholdUnits20Pct,
+            requestedQuantity: nextQty,
+            estimatedCost: nextQty * existingPending.unitWholesaleCost,
+            triggerReason: `Stock (${product.stock}u) fell below 20% of 30-day max capacity (${cap.maxCapacity30d}u · ${cap.capacityRatioPercent.toFixed(1)}%)`
+          });
+        }
+      } else {
+        if (dismissedAutoRestockSigRef.current[product.id]) {
+          delete dismissedAutoRestockSigRef.current[product.id];
+        }
+      }
+    }
+
+    if (newlyGenerated.length > 0 || updatedMap.size > 0) {
+      setAutoRestockRequests(prev => {
+        const mapped = prev.map(req => updatedMap.get(req.id) || req);
+        const next = [...newlyGenerated, ...mapped];
+        autoRestockRequestsRef.current = next;
+        return next;
+      });
+    }
+
+    if (newlyGenerated.length === 1) {
+      const r = newlyGenerated[0];
+      addAlert(
+        'warning',
+        `Auto-Restock Request: ${r.requestNumber}`,
+        `${r.sku} dropped to ${r.currentStock}/${r.maxCapacity30d}u (${r.capacityRatioPercent.toFixed(1)}% < 20% 30d max). Queued +${r.requestedQuantity}u restock request.`
+      );
+    } else if (newlyGenerated.length > 1) {
+      const skuPreview = newlyGenerated
+        .slice(0, 3)
+        .map(r => r.sku)
+        .join(', ');
+      const extra = newlyGenerated.length > 3 ? ` +${newlyGenerated.length - 3} more` : '';
+      addAlert(
+        'warning',
+        `${newlyGenerated.length} Auto-Restock Requests Generated`,
+        `SKUs below 20% of 30-day max capacity (${skuPreview}${extra}) now have pending restock requests in the Batch tab.`
+      );
+    }
+  }, [
+    isBatchAutoRestockEnabled,
+    products,
+    sku30DayCapacityMap,
+    appendAutoReplenishAuditEntry,
+    addAlert
+  ]);
+
+  const setBatchAutoRestockEnabled = useCallback(
+    (enabled: boolean) => {
+      if (enabled) {
+        // Clear previous dismissal locks so toggling ON runs a fresh evaluation
+        dismissedAutoRestockSigRef.current = {};
+      }
+      setIsBatchAutoRestockEnabledState(enabled);
+
+      if (enabled) {
+        const belowCount = products.filter(p => sku30DayCapacityMap[p.id]?.isBelow20Pct).length;
+        if (belowCount === 0) {
+          addAlert(
+            'success',
+            'Auto-Restock Enabled (<20% 30d Cap)',
+            'Live monitoring active. All SKUs are currently at or above 20% of their 30-day maximum recorded capacity.'
+          );
+        } else {
+          addAlert(
+            'info',
+            'Auto-Restock Enabled (<20% 30d Cap)',
+            `Scanning ${products.length} SKUs — detected ${belowCount} SKU${belowCount === 1 ? '' : 's'} below 20% of 30-day max capacity.`
+          );
+        }
+      } else {
+        addAlert(
+          'info',
+          'Auto-Restock Paused',
+          'Automatic 20% 30-day capacity restock generation is paused. Existing pending requests remain available.'
+        );
+      }
+    },
+    [products, sku30DayCapacityMap, addAlert]
+  );
+
+  const updateAutoRestockRequestQty = useCallback((requestId: string, newQuantity: number) => {
+    const qty = Math.max(1, Math.min(500, Math.round(newQuantity || 1)));
+    setAutoRestockRequests(prev => {
+      const next = prev.map(req =>
+        req.id === requestId && req.status === 'pending'
+          ? { ...req, requestedQuantity: qty, estimatedCost: qty * req.unitWholesaleCost }
+          : req
+      );
+      autoRestockRequestsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const dismissAutoRestockRequest = useCallback(
+    (requestId: string) => {
+      const target = autoRestockRequestsRef.current.find(r => r.id === requestId);
+      if (!target) return;
+      dismissedAutoRestockSigRef.current[target.productId] = `${target.currentStock}:${target.maxCapacity30d}`;
+      setAutoRestockRequests(prev => {
+        const next = prev.map(req =>
+          req.id === requestId ? { ...req, status: 'dismissed' as const } : req
+        );
+        autoRestockRequestsRef.current = next;
+        return next;
+      });
+      addAlert(
+        'info',
+        `Restock Request Dismissed (${target.requestNumber})`,
+        `Dismissed auto-restock request for ${target.sku}. Will re-trigger if stock drops further.`
+      );
+    },
+    [addAlert]
+  );
+
+  const fulfillAutoRestockRequest = useCallback(
+    async (requestId: string): Promise<boolean> => {
+      const target = autoRestockRequestsRef.current.find(r => r.id === requestId);
+      if (!target || target.status !== 'pending') return false;
+
+      const prod = products.find(p => p.id === target.productId);
+      const prevStock = prod ? prod.stock : target.currentStock;
+      const ok = await restockProduct(target.productId, target.requestedQuantity);
+      if (!ok) return false;
+
+      const nowIso = new Date().toISOString();
+      setAutoRestockRequests(prev => {
+        const next = prev.map(req =>
+          req.id === requestId
+            ? { ...req, status: 'fulfilled' as const, fulfilledAt: nowIso }
+            : req
+        );
+        autoRestockRequestsRef.current = next;
+        return next;
+      });
+
+      if (prod) {
+        appendAutoReplenishAuditEntry(
+          prod,
+          `Auto-Restock Fulfilled (${target.requestNumber})`,
+          `Fulfilled 30-day capacity Auto-Restock request: added +${target.requestedQuantity} units (${prevStock} → ${prevStock + target.requestedQuantity}u vs ${target.maxCapacity30d}u 30d max).`,
+          target.requestedQuantity,
+          prevStock,
+          prevStock + target.requestedQuantity,
+          'restock',
+          target.warehouse
+        );
+      }
+
+      addAlert(
+        'success',
+        `Restock Fulfilled: ${target.requestNumber}`,
+        `Added +${target.requestedQuantity} units to ${target.sku} (${prevStock} → ${prevStock + target.requestedQuantity} units).`
+      );
+      return true;
+    },
+    [products, restockProduct, appendAutoReplenishAuditEntry, addAlert]
+  );
+
+  const fulfillAllPendingAutoRestockRequests = useCallback(async (): Promise<{
+    fulfilledCount: number;
+    totalUnits: number;
+  }> => {
+    const pending = autoRestockRequestsRef.current.filter(r => r.status === 'pending');
+    let fulfilledCount = 0;
+    let totalUnits = 0;
+    for (const req of pending) {
+      const ok = await fulfillAutoRestockRequest(req.id);
+      if (ok) {
+        fulfilledCount += 1;
+        totalUnits += req.requestedQuantity;
+      }
+    }
+    return { fulfilledCount, totalUnits };
+  }, [fulfillAutoRestockRequest]);
+
+  // Background WebSocket Auto-Sync (60-second stock telemetry refresh for selected SKUs)
+  const [isAutoSyncEnabled, setIsAutoSyncEnabledState] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('omnistore_warehouse_auto_sync_enabled');
+      return saved ? JSON.parse(saved) : false;
+    } catch {
+      return false;
+    }
+  });
+  const [autoSyncStatus, setAutoSyncStatus] = useState<'idle' | 'connecting' | 'active' | 'reconnecting'>('idle');
+  const [autoSyncLastRefreshedAt, setAutoSyncLastRefreshedAt] = useState<string | null>(null);
+  const [autoSyncNextRefreshAt, setAutoSyncNextRefreshAt] = useState<number | null>(null);
+  const [autoSyncSyncedCount, setAutoSyncSyncedCount] = useState<number>(0);
+  const [autoSyncScopedToSelection, setAutoSyncScopedToSelection] = useState<boolean>(false);
+
+  const autoSyncWsRef = useRef<WebSocket | null>(null);
+  const adminSelectedIdsRef = useRef<string[]>(adminSelectedProductIds);
+
+  useEffect(() => {
+    adminSelectedIdsRef.current = adminSelectedProductIds;
+  }, [adminSelectedProductIds]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('omnistore_warehouse_auto_sync_enabled', JSON.stringify(isAutoSyncEnabled));
+    } catch {
+      // ignore storage quota errors
+    }
+  }, [isAutoSyncEnabled]);
+
+  const applyTelemetryRefreshPayload = useCallback(
+    (payload: {
+      scopedToSelection?: boolean;
+      syncedSkuCount?: number;
+      intervalMs?: number;
+      items?: {
+        id: string;
+        sku: string;
+        stock: number;
+        reserved: number;
+        lowStockThreshold: number;
+        price: number;
+        warehouse: string;
+      }[];
+      metrics?: WarehouseStockMetrics;
+      serverTimestamp?: string;
+    }) => {
+      if (Array.isArray(payload.items) && payload.items.length > 0) {
+        const byId = new Map(payload.items.map(item => [item.id, item]));
+        setProducts(prev =>
+          prev.map(p => {
+            const fresh = byId.get(p.id);
+            if (!fresh) return p;
+            return {
+              ...p,
+              stock: fresh.stock,
+              reserved: fresh.reserved,
+              lowStockThreshold: fresh.lowStockThreshold,
+              price: fresh.price,
+              warehouse: fresh.warehouse
+            };
+          })
+        );
+      }
+
+      if (payload.metrics) {
+        setMetrics(payload.metrics);
+      }
+
+      const intervalMs = Number(payload.intervalMs) || 60000;
+      setAutoSyncSyncedCount(payload.syncedSkuCount ?? payload.items?.length ?? 0);
+      setAutoSyncScopedToSelection(Boolean(payload.scopedToSelection));
+      setAutoSyncLastRefreshedAt(
+        new Date(payload.serverTimestamp || Date.now()).toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit'
+        })
+      );
+      setAutoSyncNextRefreshAt(Date.now() + intervalMs);
+    },
+    []
+  );
+
+  // Dedicated background WebSocket lifecycle for 60s SKU stock telemetry refresh
+  useEffect(() => {
+    if (!isAutoSyncEnabled) {
+      const existing = autoSyncWsRef.current;
+      if (existing) {
+        try {
+          if (existing.readyState === WebSocket.OPEN) {
+            existing.send(JSON.stringify({ type: 'telemetry:unsubscribe' }));
+          }
+          existing.close();
+        } catch {
+          // ignore close errors
+        }
+        autoSyncWsRef.current = null;
+      }
+      setAutoSyncStatus('idle');
+      setAutoSyncNextRefreshAt(null);
+      return;
+    }
+
+    let cancelled = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let ws: WebSocket | null = null;
+
+    const openAutoSyncSocket = () => {
+      if (cancelled) return;
+      setAutoSyncStatus(prev => (prev === 'idle' ? 'connecting' : 'reconnecting'));
+
+      try {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}?channel=warehouse-auto-sync`;
+        ws = new WebSocket(wsUrl);
+        autoSyncWsRef.current = ws;
+
+        ws.onopen = () => {
+          if (cancelled || !ws) return;
+          setAutoSyncStatus('active');
+          ws.send(
+            JSON.stringify({
+              type: 'telemetry:subscribe',
+              payload: {
+                productIds: adminSelectedIdsRef.current,
+                intervalMs: 60000
+              }
+            })
+          );
+        };
+
+        ws.onmessage = (event) => {
+          if (cancelled) return;
+          try {
+            const msg: RealtimeMessage = JSON.parse(event.data);
+            if (msg.type === 'telemetry:refresh' && msg.payload) {
+              applyTelemetryRefreshPayload(msg.payload);
+            }
+          } catch (err) {
+            console.error('Auto-Sync WS parse error:', err);
+          }
+        };
+
+        ws.onerror = () => {
+          if (cancelled) return;
+          try {
+            ws?.close();
+          } catch {
+            // ignore
+          }
+        };
+
+        ws.onclose = () => {
+          if (autoSyncWsRef.current === ws) {
+            autoSyncWsRef.current = null;
+          }
+          if (!cancelled) {
+            setAutoSyncStatus('reconnecting');
+            reconnectTimer = setTimeout(openAutoSyncSocket, 4000);
+          }
+        };
+      } catch {
+        if (!cancelled) {
+          setAutoSyncStatus('reconnecting');
+          reconnectTimer = setTimeout(openAutoSyncSocket, 4000);
+        }
+      }
+    };
+
+    openAutoSyncSocket();
+
+    return () => {
+      cancelled = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (ws) {
+        try {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'telemetry:unsubscribe' }));
+          }
+          ws.close();
+        } catch {
+          // ignore
+        }
+      }
+      if (autoSyncWsRef.current === ws) {
+        autoSyncWsRef.current = null;
+      }
+    };
+  }, [isAutoSyncEnabled, applyTelemetryRefreshPayload]);
+
+  // Dynamically re-scope the live 60s WebSocket subscription whenever selected SKUs change
+  useEffect(() => {
+    if (!isAutoSyncEnabled) return;
+    const ws = autoSyncWsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(
+        JSON.stringify({
+          type: 'telemetry:subscribe',
+          payload: {
+            productIds: adminSelectedProductIds,
+            intervalMs: 60000
+          }
+        })
+      );
+    }
+  }, [adminSelectedProductIds, isAutoSyncEnabled]);
+
+  const setIsAutoSyncEnabled = useCallback(
+    (enabled: boolean) => {
+      setIsAutoSyncEnabledState(enabled);
+      if (enabled) {
+        const scopeLabel =
+          adminSelectedIdsRef.current.length > 0
+            ? `${adminSelectedIdsRef.current.length} selected SKU${adminSelectedIdsRef.current.length === 1 ? '' : 's'}`
+            : 'all active warehouse SKUs';
+        addAlert(
+          'success',
+          'Background Auto-Sync Enabled (60s)',
+          `Opened real-time WebSocket stream refreshing stock telemetry for ${scopeLabel} every 60 seconds.`
+        );
+      } else {
+        addAlert(
+          'info',
+          'Background Auto-Sync Paused',
+          'Closed background 60-second WebSocket telemetry refresh stream.'
+        );
+      }
+    },
+    [addAlert]
+  );
+
+  const triggerAutoSyncNow = useCallback(() => {
+    const ws = autoSyncWsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(
+        JSON.stringify({
+          type: 'telemetry:pull',
+          payload: { productIds: adminSelectedIdsRef.current }
+        })
+      );
+    }
+  }, []);
+
+  // Batch Decommission obsolete SKUs (strictly enforces stock === 0)
+  const batchDecommissionProducts = useCallback(
+    async (
+      productIds: string[],
+      reason?: string
+    ): Promise<{
+      success: boolean;
+      decommissionedCount: number;
+      decommissionedSkus: string[];
+      blockedProducts: { id: string; sku: string; name: string; stock: number }[];
+      error?: string;
+      timestamp: string;
+    }> => {
+      const nowIso = new Date().toISOString();
+      const uniqueIds = Array.from(new Set(productIds.filter(Boolean)));
+
+      if (uniqueIds.length === 0) {
+        return {
+          success: false,
+          decommissionedCount: 0,
+          decommissionedSkus: [],
+          blockedProducts: [],
+          error: 'Select at least one zero-stock SKU to decommission.',
+          timestamp: nowIso
+        };
+      }
+
+      const targets = uniqueIds
+        .map(id => products.find(p => p.id === id || p.sku === id))
+        .filter((p): p is Product => Boolean(p));
+
+      if (targets.length === 0) {
+        return {
+          success: false,
+          decommissionedCount: 0,
+          decommissionedSkus: [],
+          blockedProducts: [],
+          error: 'No matching SKUs found in active inventory.',
+          timestamp: nowIso
+        };
+      }
+
+      // Strict client-side zero-stock enforcement
+      const blockedProducts = targets
+        .filter(p => p.stock > 0)
+        .map(p => ({ id: p.id, sku: p.sku, name: p.name, stock: p.stock }));
+
+      if (blockedProducts.length > 0) {
+        const msg = `Decommission blocked: ${blockedProducts.length} SKU(s) still hold stock (${blockedProducts
+          .slice(0, 3)
+          .map(b => `${b.sku}: ${b.stock}u`)
+          .join(', ')}). Only zero-stock (0u) products can be decommissioned.`;
+        addAlert('critical', 'Zero-Stock Enforcement Blocked Removal', msg);
+        return {
+          success: false,
+          decommissionedCount: 0,
+          decommissionedSkus: [],
+          blockedProducts,
+          error: msg,
+          timestamp: nowIso
+        };
+      }
+
+      const cleanReason =
+        reason?.trim() ||
+        'Obsolete zero-stock SKU decommissioned from active warehouse catalog.';
+      const operatorName = userProfile?.displayName || 'Warehouse Manager';
+      const decommissionIds = targets.map(p => p.id);
+      const decommissionIdSet = new Set(decommissionIds);
+      const decommissionSkuSet = new Set(targets.map(p => p.sku.trim().toUpperCase()));
+
+      let serverAuditEntries: SkuAuditLogEntry[] = [];
+      try {
+        const res = await fetch('/api/inventory/batch-decommission', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            productIds: decommissionIds,
+            reason: cleanReason,
+            operatorName
+          })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          const errMsg =
+            data?.error || 'Server rejected decommission request due to stock validation.';
+          addAlert('critical', 'Decommission Rejected', errMsg);
+          return {
+            success: false,
+            decommissionedCount: 0,
+            decommissionedSkus: [],
+            blockedProducts: data?.blockedProducts || [],
+            error: errMsg,
+            timestamp: nowIso
+          };
+        }
+        if (Array.isArray(data.auditEntries)) {
+          serverAuditEntries = data.auditEntries;
+        }
+      } catch {
+        // Proceed with local state decommission if offline
+      }
+
+      const localAuditEntries: SkuAuditLogEntry[] =
+        serverAuditEntries.length > 0
+          ? serverAuditEntries
+          : targets.map(prod => ({
+              id: _getUniqueId('AUD-DEC'),
+              sku: prod.sku,
+              productId: prod.id,
+              productName: prod.name,
+              timestamp: nowIso,
+              adjustmentValue: 0,
+              adjustmentType: 'reconciliation',
+              previousStock: 0,
+              newStock: 0,
+              operatorId: `OP-MGR (${operatorName})`,
+              operatorName,
+              reason: 'Batch Decommission — Obsolete SKU Removed',
+              warehouse: prod.warehouse,
+              notes: cleanReason
+            }));
+
+      // Remove decommissioned products from live catalog & dependent states
+      setProducts(prev => {
+        const remaining = prev.filter(p => !decommissionIdSet.has(p.id));
+        setMetrics(m => ({
+          ...m,
+          totalSkus: remaining.length,
+          unitsInStock: remaining.reduce((sum, item) => sum + item.stock, 0),
+          lowStockItemsCount: remaining.filter(
+            item => item.stock > 0 && item.stock <= item.lowStockThreshold
+          ).length
+        }));
+        return remaining;
+      });
+
+      setCart(prev => prev.filter(item => !decommissionIdSet.has(item.product.id)));
+      setWishlistProductIds(prev => prev.filter(id => !decommissionIdSet.has(id)));
+      setComparedProductIds(prev => prev.filter(id => !decommissionIdSet.has(id)));
+      setAdminSelectedProductIds(prev => prev.filter(id => !decommissionIdSet.has(id)));
+      setSelectedCatalogProductIds(prev => prev.filter(id => !decommissionIdSet.has(id)));
+      setInventoryAlerts(prev => prev.filter(a => !decommissionIdSet.has(a.productId)));
+      setWarehouseConflicts(prev =>
+        prev.filter(
+          c =>
+            !decommissionIdSet.has(c.productId) &&
+            !decommissionSkuSet.has(c.sku.trim().toUpperCase())
+        )
+      );
+      setSelectedDiscrepancySkus(prev =>
+        prev.filter(s => !decommissionSkuSet.has(s.trim().toUpperCase()))
+      );
+      setAutoReplenishmentRules(prev => {
+        const next = { ...prev };
+        for (const id of decommissionIds) {
+          delete next[id];
+        }
+        return next;
+      });
+      setAutoReplenishmentDraftPOs(prev =>
+        prev.filter(po => !decommissionIdSet.has(po.productId))
+      );
+
+      setQuickViewProduct(prev => (prev && decommissionIdSet.has(prev.id) ? null : prev));
+      setSkuAdjustProduct(prev => (prev && decommissionIdSet.has(prev.id) ? null : prev));
+      setQrCodeProduct(prev => (prev && decommissionIdSet.has(prev.id) ? null : prev));
+      setAdminTargetProductId(prev => (prev && decommissionIdSet.has(prev) ? null : prev));
+
+      setWarehouseAuditLogs(prev => {
+        const existingIds = new Set(prev.map(l => l.id));
+        const fresh = localAuditEntries.filter(l => !existingIds.has(l.id));
+        const next = [...fresh, ...prev];
+        warehouseAuditLogsRef.current = next;
+        return next;
+      });
+
+      const decommissionedSkus = targets.map(p => p.sku);
+      addAlert(
+        'success',
+        'Batch Decommission Complete',
+        `Permanently removed ${targets.length} obsolete zero-stock SKU${
+          targets.length === 1 ? '' : 's'
+        } (${decommissionedSkus.slice(0, 3).join(', ')}${
+          decommissionedSkus.length > 3 ? ` +${decommissionedSkus.length - 3}` : ''
+        }).`
+      );
+
+      return {
+        success: true,
+        decommissionedCount: targets.length,
+        decommissionedSkus,
+        blockedProducts: [],
+        timestamp: nowIso
+      };
+    },
+    [products, userProfile, addAlert]
+  );
 
   // Track order
   const trackOrder = async (orderNumber: string): Promise<Order | null> => {
@@ -2587,6 +4274,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         toggleSkuDamagedFlag,
         refreshWarehouseAuditLogs,
         clearSkuAuditFlags,
+        flaggedAuditAlerts,
+        dismissFlaggedAuditAlert,
+        globalAuditLogTarget,
+        openGlobalSkuAuditLog,
+        closeGlobalSkuAuditLog,
         customerDefaultWarehouse,
         setCustomerDefaultWarehouse,
         setOnlyWishlist,
@@ -2662,7 +4354,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         setAdminTargetProductId,
         openAdminForProduct,
         warehouseConflicts,
+        highlightedConflictId,
         dismissWarehouseConflict,
+        focusOrOpenWarehouseConflictToast,
         resolveWarehouseConflict,
         reportInventoryEditingSession,
         simulateWarehouseConflict,
@@ -2677,7 +4371,31 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         toggleDiscrepancySkuSelection,
         reconciledDiscrepancySkus,
         openBatchReconcileForSkus,
-        batchClearAndReconcileDiscrepancies
+        batchClearAndReconcileDiscrepancies,
+        executeStockRebalanceTransfers,
+        autoReplenishmentRules,
+        autoReplenishmentDraftPOs,
+        setAutoReplenishmentRule,
+        approveAutoReplenishmentDraftPO,
+        updateAutoReplenishmentDraftPOQty,
+        dismissAutoReplenishmentDraftPO,
+        batchDecommissionProducts,
+        isBatchAutoRestockEnabled,
+        setBatchAutoRestockEnabled,
+        autoRestockRequests,
+        sku30DayCapacityMap,
+        fulfillAutoRestockRequest,
+        fulfillAllPendingAutoRestockRequests,
+        updateAutoRestockRequestQty,
+        dismissAutoRestockRequest,
+        isAutoSyncEnabled,
+        setIsAutoSyncEnabled,
+        autoSyncStatus,
+        autoSyncLastRefreshedAt,
+        autoSyncNextRefreshAt,
+        autoSyncSyncedCount,
+        autoSyncScopedToSelection,
+        triggerAutoSyncNow
       }}
     >
       {children}

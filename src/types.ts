@@ -210,7 +210,7 @@ export interface WarehouseConflictEvent {
 }
 
 export interface RealtimeMessage {
-  type: 'inventory:sync' | 'inventory:update' | 'inventory:alert' | 'activity:purchase' | 'stats:update' | 'price:update' | 'price:alert' | 'review:add' | 'review:vote' | 'warehouse:conflict' | 'warehouse:editing_session';
+  type: 'inventory:sync' | 'inventory:update' | 'inventory:alert' | 'activity:purchase' | 'stats:update' | 'price:update' | 'price:alert' | 'review:add' | 'review:vote' | 'warehouse:conflict' | 'warehouse:editing_session' | 'telemetry:refresh';
   payload: any;
   timestamp: string;
 }
@@ -443,5 +443,61 @@ export interface RestockProcurementDraft {
     safetyBufferDays: number;
   };
 }
+
+export interface AutoReplenishmentRule {
+  productId: string;
+  sku: string;
+  productName: string;
+  warehouse: string;
+  enabled: boolean;
+  targetStock: number;
+  updatedAt: string;
+}
+
+export interface AutoReplenishmentDraftPO {
+  id: string;
+  poNumber: string;
+  productId: string;
+  sku: string;
+  productName: string;
+  productImage: string;
+  warehouse: string;
+  currentStockAtTrigger: number;
+  targetStock: number;
+  orderQuantity: number;
+  unitWholesaleCost: number;
+  estimatedTotalCost: number;
+  status: 'draft' | 'approved' | 'dismissed';
+  triggerSource: 'auto_threshold' | 'threshold_configured' | 'stock_drop';
+  createdAt: string;
+  approvedAt?: string;
+}
+
+export interface CapacityPeakRecord {
+  stock: number;
+  recordedAt: string;
+}
+
+export interface AutoRestockRequest {
+  id: string;
+  requestNumber: string;
+  productId: string;
+  sku: string;
+  productName: string;
+  productImage: string;
+  warehouse: string;
+  currentStock: number;
+  maxCapacity30d: number;
+  capacityRatioPercent: number;
+  thresholdUnits20Pct: number;
+  requestedQuantity: number;
+  unitWholesaleCost: number;
+  estimatedCost: number;
+  status: 'pending' | 'fulfilled' | 'dismissed';
+  triggerReason: string;
+  createdAt: string;
+  fulfilledAt?: string;
+}
+
 
 

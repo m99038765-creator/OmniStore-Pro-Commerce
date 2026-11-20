@@ -33,7 +33,10 @@ import {
   FileDown,
   Scale,
   ShieldCheck,
-  ClipboardCheck
+  ClipboardCheck,
+  ArrowLeftRight,
+  ArchiveX,
+  Radio
 } from 'lucide-react';
 import { useStore } from '../context/StoreContext';
 import { Product } from '../types';
@@ -51,9 +54,12 @@ import { AuditComplianceReportModal } from './AuditComplianceReportModal';
 import { StockVarianceMonitorModal } from './StockVarianceMonitorModal';
 import { WarehouseBatchReconcile } from './WarehouseBatchReconcile';
 import { InventoryIntegritySummaryModal } from './InventoryIntegritySummaryModal';
+import { AutomatedStockRebalanceModal } from './AutomatedStockRebalanceModal';
+import { BatchDecommissionModal } from './BatchDecommissionModal';
 import { getAllRegionalConflicts } from '../utils/inventoryConflicts';
 import { getChartSkuDiscrepancies } from '../utils/warehouseZoneDiscrepancies';
 import { computeInventoryIntegritySummary } from '../utils/inventoryIntegritySummary';
+import { computeAutomatedStockRebalancePlan } from '../utils/automatedStockRebalance';
 import {
   aggregateWeeklyComplianceAuditData,
   downloadWeeklyComplianceAuditPdf
@@ -95,7 +101,17 @@ export const WarehouseAdminModal: React.FC = () => {
     reconciledDiscrepancySkus,
     selectedDiscrepancySkus,
     openBatchReconcileForSkus,
-    userProfile
+    userProfile,
+    isBatchAutoRestockEnabled,
+    autoRestockRequests,
+    isAutoSyncEnabled,
+    setIsAutoSyncEnabled,
+    autoSyncStatus,
+    autoSyncLastRefreshedAt,
+    autoSyncNextRefreshAt,
+    autoSyncSyncedCount,
+    autoSyncScopedToSelection,
+    triggerAutoSyncNow
   } = useStore();
 
   const [scannerProductId, setScannerProductId] = useState<string | null>(null);
@@ -112,14 +128,66 @@ export const WarehouseAdminModal: React.FC = () => {
   const [isAuditReportOpen, setIsAuditReportOpen] = useState(false);
   const [isVarianceMonitorOpen, setIsVarianceMonitorOpen] = useState(false);
   const [isIntegritySummaryOpen, setIsIntegritySummaryOpen] = useState(false);
+  const [isRebalanceOpen, setIsRebalanceOpen] = useState(false);
+  const [isDecommissionOpen, setIsDecommissionOpen] = useState(false);
   const [isGeneratingWeeklyPdf, setIsGeneratingWeeklyPdf] = useState(false);
   const [skuFilterSearch, setSkuFilterSearch] = useState('');
+
+  const zeroStockEligibleCount = useMemo(
+    () => products.filter(p => p.stock === 0).length,
+    [products]
+  );
+
+  const pendingAutoRestockCount = useMemo(
+    () => autoRestockRequests.filter(r => r.status === 'pending').length,
+    [autoRestockRequests]
+  );
+
+  // Live 1-second countdown display until next 60s WebSocket telemetry refresh
+  const [autoSyncSecondsRemaining, setAutoSyncSecondsRemaining] = useState<number>(60);
+
+  useEffect(() => {
+    if (!isAutoSyncEnabled || !autoSyncNextRefreshAt) {
+      setAutoSyncSecondsRemaining(60);
+      return;
+    }
+
+    const updateRemaining = () => {
+      const diffSec = Math.max(0, Math.ceil((autoSyncNextRefreshAt - Date.now()) / 1000));
+      setAutoSyncSecondsRemaining(diffSec);
+    };
+
+    updateRemaining();
+    const timer = setInterval(updateRemaining, 1000);
+    return () => clearInterval(timer);
+  }, [isAutoSyncEnabled, autoSyncNextRefreshAt]);
+
+  const autoSyncSelectedSkuPreview = useMemo(() => {
+    if (adminSelectedProductIds.length === 0) return '';
+    const selectedSkus = products
+      .filter(p => adminSelectedProductIds.includes(p.id))
+      .map(p => p.sku);
+    if (selectedSkus.length <= 3) return selectedSkus.join(', ');
+    return `${selectedSkus.slice(0, 3).join(', ')} +${selectedSkus.length - 3} more`;
+  }, [products, adminSelectedProductIds]);
 
   const integrityAnomalyCount = useMemo(
     () =>
       computeInventoryIntegritySummary(products, orders, warehouseAuditLogs)
         .flaggedAnomalySkusCount,
     [products, orders, warehouseAuditLogs]
+  );
+
+  const suggestedRebalanceCount = useMemo(
+    () =>
+      computeAutomatedStockRebalancePlan(
+        products,
+        orders,
+        warehouseAuditLogs,
+        warehouseConflicts,
+        resolvedRegionalConflictSkus
+      ).totalTransfers,
+    [products, orders, warehouseAuditLogs, warehouseConflicts, resolvedRegionalConflictSkus]
   );
 
   const weeklyComplianceStats = useMemo(
@@ -455,6 +523,44 @@ export const WarehouseAdminModal: React.FC = () => {
             <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
               <button
                 type="button"
+                id="warehouse-batch-decommission-btn"
+                onClick={() => setIsDecommissionOpen(true)}
+                title="Remove obsolete SKUs from the system — strictly enforces that only products with zero stock (0 units) can be decommissioned"
+                className="px-3 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-200 border border-rose-500/45 text-xs font-mono font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-xs"
+              >
+                <ArchiveX className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                <span className="hidden md:inline">Batch Decommission</span>
+                <span className="md:hidden">Decommission</span>
+                <span
+                  className={`px-1.5 py-0.2 rounded-md text-[10px] font-bold border ${
+                    zeroStockEligibleCount > 0
+                      ? 'bg-rose-500/30 text-rose-100 border-rose-400/45'
+                      : 'bg-neutral-800/80 text-neutral-400 border-neutral-700'
+                  }`}
+                >
+                  {zeroStockEligibleCount} Zero-Stock
+                </span>
+              </button>
+
+              <button
+                type="button"
+                id="warehouse-automated-rebalance-btn"
+                onClick={() => setIsRebalanceOpen(true)}
+                title="Analyze all regional inventory discrepancies and calculate suggested inter-warehouse transfer quantities to normalize stock levels"
+                className="px-3 py-1.5 rounded-xl bg-violet-500/15 hover:bg-violet-500/25 text-violet-200 border border-violet-500/45 text-xs font-mono font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-xs"
+              >
+                <ArrowLeftRight className="w-3.5 h-3.5 text-violet-400 shrink-0" />
+                <span className="hidden md:inline">Automated Stock Rebalance</span>
+                <span className="md:hidden">Rebalance</span>
+                {suggestedRebalanceCount > 0 && (
+                  <span className="px-1.5 py-0.2 rounded-md text-[10px] font-bold bg-violet-500/30 text-violet-100 border border-violet-400/45">
+                    {suggestedRebalanceCount} Route{suggestedRebalanceCount === 1 ? '' : 's'}
+                  </span>
+                )}
+              </button>
+
+              <button
+                type="button"
                 id="warehouse-inventory-integrity-summary-btn"
                 onClick={() => setIsIntegritySummaryOpen(true)}
                 title="Open 30-day Inventory Integrity Summary table highlighting stock decreases without a corresponding sales record"
@@ -621,6 +727,15 @@ export const WarehouseAdminModal: React.FC = () => {
                     Multi-SKU
                   </span>
                 )}
+                {isBatchAutoRestockEnabled && (
+                  <span
+                    className="inline-flex items-center gap-1 text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-bold"
+                    title="Auto-Restock (<20% of 30-day max capacity) is enabled"
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    {pendingAutoRestockCount > 0 ? `${pendingAutoRestockCount} Auto` : 'Auto'}
+                  </span>
+                )}
               </button>
 
               <button
@@ -666,8 +781,46 @@ export const WarehouseAdminModal: React.FC = () => {
               </button>
             </div>
 
-            {/* Prominent Safe Mode Toggle Switch */}
-            <div className="flex items-center gap-2">
+            {/* Background Auto-Sync (60s WebSocket) & Safe Mode Controls */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                id="warehouse-admin-auto-sync-toggle"
+                type="button"
+                role="switch"
+                aria-checked={isAutoSyncEnabled}
+                onClick={() => setIsAutoSyncEnabled(!isAutoSyncEnabled)}
+                className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-2 transition-all cursor-pointer border ${
+                  isAutoSyncEnabled
+                    ? 'bg-sky-500/20 text-sky-200 border-sky-500/60 shadow-md shadow-sky-950/40 ring-1 ring-sky-500/30 font-bold'
+                    : 'bg-neutral-900 text-neutral-400 hover:text-white border-neutral-800'
+                }`}
+                title={
+                  isAutoSyncEnabled
+                    ? `Background WebSocket Auto-Sync active: refreshes stock telemetry every 60s for ${
+                        adminSelectedProductIds.length > 0
+                          ? `${adminSelectedProductIds.length} selected SKU(s)`
+                          : `all ${products.length} SKUs`
+                      }`
+                    : 'Enable background WebSocket connection to refresh warehouse stock telemetry for selected SKUs every 60 seconds'
+                }
+              >
+                <Radio
+                  className={`w-3.5 h-3.5 ${
+                    isAutoSyncEnabled ? 'text-sky-400 animate-pulse' : 'text-neutral-500'
+                  }`}
+                />
+                <span>Auto-Sync: {isAutoSyncEnabled ? 'ON' : 'OFF'}</span>
+                {isAutoSyncEnabled && (
+                  <span className="font-mono text-[10px] px-1.5 py-0.2 rounded bg-sky-500/25 text-sky-200 border border-sky-400/40">
+                    {autoSyncStatus === 'active'
+                      ? `${autoSyncSecondsRemaining}s`
+                      : autoSyncStatus === 'reconnecting'
+                      ? 'Reconn...'
+                      : 'Init...'}
+                  </span>
+                )}
+              </button>
+
               <button
                 id="warehouse-admin-safe-mode-toggle"
                 type="button"
@@ -741,6 +894,65 @@ export const WarehouseAdminModal: React.FC = () => {
               </div>
             )}
           </div>
+
+          {/* Active Background WebSocket Auto-Sync Bar */}
+          {isAutoSyncEnabled && (
+            <div
+              id="warehouse-auto-sync-active-bar"
+              className="px-4 sm:px-5 py-2 bg-sky-950/35 border-b border-sky-500/30 flex flex-wrap items-center justify-between gap-2 text-[11px]"
+            >
+              <div className="flex items-center gap-2 flex-wrap font-mono">
+                <span
+                  className={`w-2 h-2 rounded-full shrink-0 ${
+                    autoSyncStatus === 'active'
+                      ? 'bg-sky-400 animate-pulse'
+                      : 'bg-amber-400 animate-ping'
+                  }`}
+                />
+                <span className="text-sky-200 font-bold">
+                  WebSocket Auto-Sync Active (60s)
+                </span>
+                <span className="text-neutral-500">·</span>
+                <span className="text-neutral-300">
+                  Scope:{' '}
+                  <strong className="text-white">
+                    {adminSelectedProductIds.length > 0
+                      ? `${adminSelectedProductIds.length} Selected SKU${adminSelectedProductIds.length === 1 ? '' : 's'}`
+                      : `All ${autoSyncSyncedCount || products.length} Active SKUs`}
+                  </strong>
+                  {autoSyncSelectedSkuPreview && (
+                    <span className="text-sky-300/90 ml-1">({autoSyncSelectedSkuPreview})</span>
+                  )}
+                </span>
+                {!autoSyncScopedToSelection && adminSelectedProductIds.length === 0 && (
+                  <span className="text-neutral-400 hidden md:inline">
+                    — select SKUs to narrow refresh scope
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2.5 font-mono shrink-0">
+                {autoSyncLastRefreshedAt && (
+                  <span className="text-neutral-400">
+                    Last sync: <strong className="text-emerald-300">{autoSyncLastRefreshedAt}</strong>
+                  </span>
+                )}
+                <span className="text-sky-300">
+                  Next: <strong>{autoSyncSecondsRemaining}s</strong>
+                </span>
+                <button
+                  id="warehouse-auto-sync-now-btn"
+                  type="button"
+                  onClick={triggerAutoSyncNow}
+                  className="px-2 py-0.5 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 border border-sky-500/45 text-sky-200 font-semibold flex items-center gap-1 transition-colors cursor-pointer"
+                  title="Pull fresh warehouse stock telemetry immediately over the active WebSocket connection"
+                >
+                  <RefreshCw className="w-3 h-3 text-sky-300" />
+                  <span>Sync Now</span>
+                </button>
+              </div>
+            </div>
+          )}
 
           {adminActiveTab === 'scanner' ? (
             <div className="flex-1 overflow-y-auto p-4 sm:p-5">
@@ -1699,6 +1911,27 @@ export const WarehouseAdminModal: React.FC = () => {
         onOpenAuditLog={handleOpenSkuAudit}
         onOpenStockAdjust={handleOpenStockAdjust}
         onSendToBatchReconcile={(skus) => openBatchReconcileForSkus(skus)}
+      />
+
+      {/* Automated Stock Rebalance Planner Modal */}
+      <AutomatedStockRebalanceModal
+        isOpen={isRebalanceOpen}
+        onClose={() => setIsRebalanceOpen(false)}
+        onSuccess={(msg) => {
+          setActionSuccess(msg);
+          setTimeout(() => setActionSuccess(null), 5000);
+        }}
+      />
+
+      {/* Batch Decommission Obsolete SKUs Modal (Zero-Stock Enforced) */}
+      <BatchDecommissionModal
+        isOpen={isDecommissionOpen}
+        onClose={() => setIsDecommissionOpen(false)}
+        initialSelectedIds={adminSelectedProductIds}
+        onSuccess={(msg) => {
+          setActionSuccess(msg);
+          setTimeout(() => setActionSuccess(null), 5000);
+        }}
       />
     </AnimatePresence>
   );

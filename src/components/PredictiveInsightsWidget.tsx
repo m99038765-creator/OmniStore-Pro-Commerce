@@ -29,7 +29,8 @@ import {
   TrendingDown,
   Activity,
   PackagePlus,
-  Eye
+  Eye,
+  Scale
 } from 'lucide-react';
 import {
   Product,
@@ -43,6 +44,7 @@ import {
   calculateCategoryDepletionReport,
   calculateSkuAiSuggestions
 } from '../utils/aiSkuSuggestionEngine';
+import { computeRestockEfficiencyMetrics } from '../utils/restockEfficiency';
 import { useStore } from '../context/StoreContext';
 import { RestockProcurementDraftModal } from './RestockProcurementDraftModal';
 
@@ -63,7 +65,13 @@ export const PredictiveInsightsWidget: React.FC<PredictiveInsightsWidgetProps> =
   onOpenBatchRestock,
   onOpenAdminModal
 }) => {
-  const { batchAdjustStock, addAlert, warehouseAuditLogs } = useStore();
+  const {
+    batchAdjustStock,
+    addAlert,
+    warehouseAuditLogs,
+    autoRestockRequests,
+    autoReplenishmentDraftPOs
+  } = useStore();
 
   const [report, setReport] = useState<CategoryDepletionReport | null>(null);
   const [loading, setLoading] = useState(false);
@@ -126,6 +134,19 @@ export const PredictiveInsightsWidget: React.FC<PredictiveInsightsWidgetProps> =
     }
     return report.categories;
   }, [report, filterMode]);
+
+  // Restock Efficiency: live ratio of restock order inflow rate to actual sales velocity
+  const restockEfficiency = useMemo(
+    () =>
+      computeRestockEfficiencyMetrics({
+        report,
+        orders,
+        auditLogs: warehouseAuditLogs,
+        autoRestockRequests,
+        autoReplenishmentDraftPOs
+      }),
+    [report, orders, warehouseAuditLogs, autoRestockRequests, autoReplenishmentDraftPOs]
+  );
 
   // Automated Replenishment Simulation Engine:
   // Projects exact stock-out dates, calculates lead time breaches, and determines optimal order batches
@@ -418,6 +439,117 @@ export const PredictiveInsightsWidget: React.FC<PredictiveInsightsWidgetProps> =
   const highTurnoverCategories = report.categories.filter(
     c => c.turnoverSpeed === 'ultra-high' || c.turnoverSpeed === 'high'
   );
+
+  const renderRestockEfficiencyCard = (cardId: string, extraClassName = '') => {
+    const eff = restockEfficiency;
+    const isOptimal = eff.status === 'optimal';
+    const isOver = eff.status === 'over_restocking';
+    const isCriticalDeficit = eff.status === 'critical_deficit';
+
+    const borderClass = isOptimal
+      ? 'border-emerald-500/40 bg-emerald-950/15'
+      : isOver
+      ? 'border-sky-500/40 bg-sky-950/15'
+      : isCriticalDeficit
+      ? 'border-rose-500/40 bg-rose-950/15'
+      : 'border-amber-500/40 bg-amber-950/15';
+
+    const valueColorClass = isOptimal
+      ? 'text-emerald-400'
+      : isOver
+      ? 'text-sky-400'
+      : isCriticalDeficit
+      ? 'text-rose-400'
+      : 'text-amber-400';
+
+    const badgeClass = isOptimal
+      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+      : isOver
+      ? 'bg-sky-500/20 text-sky-300 border-sky-500/40'
+      : isCriticalDeficit
+      ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+      : 'bg-amber-500/20 text-amber-300 border-amber-500/40';
+
+    const markerColorClass = isOptimal
+      ? 'bg-emerald-400 ring-emerald-400/40'
+      : isOver
+      ? 'bg-sky-400 ring-sky-400/40'
+      : isCriticalDeficit
+      ? 'bg-rose-400 ring-rose-400/40'
+      : 'bg-amber-400 ring-amber-400/40';
+
+    const tooltipText = `Restock Efficiency = Restock Order Rate (${eff.restockRatePerDay} u/day across ${eff.restockOrderCount} order${eff.restockOrderCount === 1 ? '' : 's'}: ${eff.executedRestockUnits}u executed${eff.queuedRestockUnits > 0 ? ` + ${eff.queuedRestockUnits}u queued` : ''} over ${eff.windowDays}d) ÷ Actual Sales Velocity (${eff.actualSalesVelocityPerDay} u/day). Target optimal range: 0.85x–1.15x.`;
+
+    return (
+      <div
+        id={cardId}
+        title={tooltipText}
+        className={`p-3.5 rounded-xl bg-neutral-900/80 border ${borderClass} flex flex-col justify-between ${extraClassName}`}
+      >
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[10px] font-mono text-neutral-400 uppercase tracking-wider">
+            Restock Efficiency
+          </span>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <span
+              className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border uppercase ${badgeClass}`}
+            >
+              {eff.statusLabel}
+            </span>
+            <Scale className={`w-3.5 h-3.5 ${valueColorClass}`} />
+          </div>
+        </div>
+
+        <div className="my-1.5 space-y-1.5">
+          <div className="flex items-baseline justify-between gap-2">
+            <div className="flex items-baseline gap-1.5">
+              <span className={`text-2xl font-bold font-mono ${valueColorClass}`}>
+                {eff.ratio.toFixed(2)}x
+              </span>
+              <span className="text-[11px] font-mono text-neutral-400">
+                ({eff.efficiencyPercent}%)
+              </span>
+            </div>
+            <span className="text-[10px] font-mono text-neutral-400">
+              {eff.restockOrderCount} order{eff.restockOrderCount === 1 ? '' : 's'}
+            </span>
+          </div>
+
+          {/* Efficiency Ratio Target Band Gauge (0.0x .. 1.6x, Optimal 0.85x..1.15x) */}
+          <div className="relative h-1.5 w-full rounded-full bg-neutral-950 border border-neutral-800 overflow-visible">
+            {/* Optimal Zone Highlight (0.85x - 1.15x) */}
+            <div
+              className="absolute top-0 bottom-0 bg-emerald-500/30 border-x border-emerald-400/50 rounded-xs"
+              style={{ left: '53.1%', width: '18.8%' }}
+            />
+            {/* Ideal 1.0x center tick */}
+            <div
+              className="absolute -top-0.5 -bottom-0.5 w-[1px] bg-emerald-300/70"
+              style={{ left: '62.5%' }}
+            />
+            {/* Current Ratio Marker */}
+            <div
+              className={`absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-2.5 h-2.5 rounded-full ring-2 transition-all duration-300 ${markerColorClass}`}
+              style={{ left: `${eff.gaugePositionPercent}%` }}
+            />
+          </div>
+
+          <div className="flex items-center justify-between text-[10px] font-mono text-neutral-400">
+            <span>
+              Inflow: <strong className="text-neutral-200">{eff.restockRatePerDay}</strong> u/d
+            </span>
+            <span>
+              Sales: <strong className="text-neutral-200">{eff.actualSalesVelocityPerDay}</strong> u/d
+            </span>
+          </div>
+        </div>
+
+        <span className="text-[10px] text-neutral-400 leading-snug block">
+          {eff.optimizationTip}
+        </span>
+      </div>
+    );
+  };
 
   return (
     <section
@@ -713,7 +845,7 @@ export const PredictiveInsightsWidget: React.FC<PredictiveInsightsWidgetProps> =
               </div>
 
               {/* Simulation KPI Summary Cards */}
-              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+              <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
                 <div className="p-3.5 rounded-xl bg-neutral-900/80 border border-rose-500/40 bg-rose-950/15 flex flex-col justify-between">
                   <div className="flex items-center justify-between">
                     <span className="text-[10px] font-mono text-neutral-400 uppercase tracking-wider">
@@ -790,6 +922,9 @@ export const PredictiveInsightsWidget: React.FC<PredictiveInsightsWidgetProps> =
                     </span>
                   </div>
                 </div>
+
+                {/* Restock Efficiency KPI Card */}
+                {renderRestockEfficiencyCard('predictive-sim-restock-efficiency-card', 'col-span-2 lg:col-span-1')}
               </div>
 
               {/* Projected Stock-Out Timeline Table & Restock Directives */}
@@ -946,9 +1081,9 @@ export const PredictiveInsightsWidget: React.FC<PredictiveInsightsWidgetProps> =
             /* ========================================================================= */
             <>
               {/* Executive Strategic Summary & KPI Banner */}
-              <div className="grid grid-cols-1 lg:grid-cols-4 gap-3">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-12 gap-3">
                 {/* AI Synthesis Narrative */}
-                <div className="lg:col-span-3 p-3.5 rounded-xl bg-violet-950/20 border border-violet-500/30 flex items-start gap-3">
+                <div className="md:col-span-2 lg:col-span-6 p-3.5 rounded-xl bg-violet-950/20 border border-violet-500/30 flex items-start gap-3">
                   <div className="p-1.5 rounded-lg bg-violet-500/20 text-violet-300 mt-0.5 shrink-0">
                     <Sparkles className="w-4 h-4 text-violet-400" />
                   </div>
@@ -968,7 +1103,7 @@ export const PredictiveInsightsWidget: React.FC<PredictiveInsightsWidgetProps> =
                 </div>
 
                 {/* Total Optimal Restock KPI Card */}
-                <div className="p-3.5 rounded-xl bg-neutral-900/80 border border-neutral-800 flex flex-col justify-between">
+                <div className="lg:col-span-3 p-3.5 rounded-xl bg-neutral-900/80 border border-neutral-800 flex flex-col justify-between">
                   <span className="text-[10px] font-mono text-neutral-400 uppercase tracking-wider">
                     Total Recommended Restock
                   </span>
@@ -987,6 +1122,9 @@ export const PredictiveInsightsWidget: React.FC<PredictiveInsightsWidgetProps> =
                     Guarantees 14-day supply buffer across all bays
                   </span>
                 </div>
+
+                {/* Restock Efficiency KPI Card */}
+                {renderRestockEfficiencyCard('predictive-restock-efficiency-card', 'lg:col-span-3')}
               </div>
 
               {/* Replenishment Simulation Promotion Bar */}

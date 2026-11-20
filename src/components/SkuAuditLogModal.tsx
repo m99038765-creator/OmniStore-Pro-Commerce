@@ -19,13 +19,24 @@ import {
   ShieldCheck,
   Download,
   AlertCircle,
+  AlertTriangle,
+  CheckCircle2,
   FileJson,
-  Printer
+  Printer,
+  ShieldAlert,
+  Loader2,
+  MessageSquarePlus
 } from 'lucide-react';
 import { Product, SkuAuditLogEntry } from '../types';
 import { getAuditLogsForSku } from '../data/initialAuditLogs';
 import { AuditLogExportModal } from './AuditLogExportModal';
 import { useStore } from '../context/StoreContext';
+import {
+  checkSkuAuditLogSafety,
+  isAuditEntryQuarantineOrDamaged,
+  isAuditEntryDamagedClearance,
+  isAuditEntryQuarantineClearance
+} from '../utils/skuAuditSafety';
 
 interface SkuAuditLogModalProps {
   product?: Product | null;
@@ -47,10 +58,14 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
   const currentStock = product?.stock ?? 0;
   const warehouse = product?.warehouse || 'Central Logistics Hub (WH-01)';
 
-  const { warehouseAuditLogs, checkSkuSafety, clearSkuAuditFlags } = useStore();
+  const { warehouseAuditLogs, clearSkuAuditFlags, userProfile } = useStore();
   const [logs, setLogs] = useState<SkuAuditLogEntry[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isClearingFlag, setIsClearingFlag] = useState<boolean>(false);
+  const [isQuickClearOpen, setIsQuickClearOpen] = useState<boolean>(false);
+  const [resolvedNoteInput, setResolvedNoteInput] = useState<string>('');
+  const [quickClearTargetEntryId, setQuickClearTargetEntryId] = useState<string | null>(null);
+  const [justClearedInfo, setJustClearedInfo] = useState<{ note: string; timestamp: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [searchFilter, setSearchFilter] = useState<string>('');
   const [typeFilter, setTypeFilter] = useState<'all' | 'positive' | 'negative' | 'cycle_count' | 'last_8h'>('all');
@@ -58,7 +73,31 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
   const [copiedCsv, setCopiedCsv] = useState(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
 
-  const skuSafety = useMemo(() => checkSkuSafety(activeSku), [activeSku, checkSkuSafety]);
+  const RESOLVED_NOTE_PRESETS = [
+    'Resolved: Physical QA inspection passed — packaging replaced & verified intact.',
+    'Resolved: Quarantine hold lifted after calibration and serial verification.',
+    'Resolved: Damaged units isolated; remaining warehouse stock verified sellable.'
+  ];
+
+  // Evaluate safety status across the merged modal logs so both backend and store flags are detected
+  const skuSafety = useMemo(
+    () => checkSkuAuditLogSafety(activeSku, logs.length > 0 ? logs : warehouseAuditLogs),
+    [activeSku, logs, warehouseAuditLogs]
+  );
+
+  const activeFlaggedEntryIds = useMemo(
+    () => new Set(skuSafety.flaggedEntries.map(e => e.id)),
+    [skuSafety.flaggedEntries]
+  );
+
+  const hasClearanceEntry = useMemo(
+    () =>
+      logs.some(
+        entry =>
+          isAuditEntryDamagedClearance(entry) || isAuditEntryQuarantineClearance(entry)
+      ),
+    [logs]
+  );
 
   const mergeWithStoreLogs = (fetchedLogs: SkuAuditLogEntry[]): SkuAuditLogEntry[] => {
     const cleanActive = activeSku.toUpperCase().replace(/[-\s_]/g, '');
@@ -109,11 +148,59 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
     }
   }, [isOpen, activeSku, warehouseAuditLogs]);
 
-  const handleAuditorClearFlag = async () => {
+  // Reset inline quick-clear composer when modal closes or SKU changes
+  useEffect(() => {
+    if (!isOpen) {
+      setIsQuickClearOpen(false);
+      setResolvedNoteInput('');
+      setQuickClearTargetEntryId(null);
+      setJustClearedInfo(null);
+    }
+  }, [isOpen, activeSku]);
+
+  const openQuickClearPanel = (entry?: SkuAuditLogEntry) => {
+    setQuickClearTargetEntryId(entry?.id || null);
+    if (!resolvedNoteInput.trim()) {
+      const flagCheck = entry ? isAuditEntryQuarantineOrDamaged(entry) : null;
+      const defaultNote =
+        flagCheck?.isQuarantine && !flagCheck?.isDamaged
+          ? 'Resolved: Quarantine inspection passed; SKU verified compliant and cleared for active fulfillment.'
+          : flagCheck?.isDamaged && !flagCheck?.isQuarantine
+          ? 'Resolved: Damaged unit isolated and verified; remaining inventory cleared for release.'
+          : 'Resolved: Manager verified item condition and cleared Quarantine / Damage flags.';
+      setResolvedNoteInput(defaultNote);
+    }
+    setIsQuickClearOpen(true);
+    requestAnimationFrame(() => {
+      document.getElementById('quick-clear-resolved-note-input')?.focus();
+    });
+  };
+
+  const handleConfirmQuickClear = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
     if (!activeSku || isClearingFlag) return;
+
+    const noteToAppend =
+      resolvedNoteInput.trim() ||
+      'Resolved: Manager verified item condition and cleared Quarantine / Damage flags.';
+    const managerName = userProfile?.displayName || 'Warehouse Manager';
+
     setIsClearingFlag(true);
-    await clearSkuAuditFlags(activeSku);
+    const ok = await clearSkuAuditFlags(activeSku, managerName, noteToAppend);
     setIsClearingFlag(false);
+
+    if (ok) {
+      const formattedNote = noteToAppend.toLowerCase().startsWith('resolved')
+        ? noteToAppend
+        : `Resolved: ${noteToAppend}`;
+      setJustClearedInfo({
+        note: formattedNote,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      });
+      setIsQuickClearOpen(false);
+      setResolvedNoteInput('');
+      setQuickClearTargetEntryId(null);
+    }
   };
 
   // Handle escape key
@@ -215,7 +302,7 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
   return (
     <div
       id="sku-audit-log-backdrop"
-      className="fixed inset-0 z-60 bg-black/80 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto"
+      className="fixed inset-0 z-[80] bg-black/80 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -239,6 +326,31 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
                   <ShieldCheck className="w-3 h-3 text-amber-400" />
                   Verified Ledger
                 </span>
+                {!skuSafety.isSafe ? (
+                  <span
+                    id="audit-modal-status-badge"
+                    className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/45 flex items-center gap-1"
+                  >
+                    <ShieldAlert className="w-3 h-3 text-rose-400" />
+                    Status: {skuSafety.statusLabel}
+                  </span>
+                ) : hasClearanceEntry || justClearedInfo ? (
+                  <span
+                    id="audit-modal-status-badge"
+                    className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/45 flex items-center gap-1"
+                  >
+                    <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                    Status: Cleared
+                  </span>
+                ) : (
+                  <span
+                    id="audit-modal-status-badge"
+                    className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 flex items-center gap-1"
+                  >
+                    <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                    Status: Clean
+                  </span>
+                )}
               </div>
               <div className="flex items-center gap-2 mt-1 flex-wrap">
                 <button
@@ -262,18 +374,18 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 shrink-0">
             {!skuSafety.isSafe && (
               <button
                 type="button"
-                id="auditor-clear-flag-btn"
-                onClick={handleAuditorClearFlag}
+                id="quick-clear-flagged-sku-btn"
+                onClick={() => openQuickClearPanel(skuSafety.primaryFlaggedEntry)}
                 disabled={isClearingFlag}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-neutral-950 font-bold text-xs transition-all cursor-pointer shadow-xs"
-                title={`Clear active ${skuSafety.statusLabel} flag as QA Auditor`}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-60 text-neutral-950 font-bold text-xs transition-all cursor-pointer shadow-xs active:scale-95"
+                title={`Append a Resolved note and automatically update ${activeSku} audit status to Cleared`}
               >
-                <ShieldCheck className="w-3.5 h-3.5" />
-                <span>{isClearingFlag ? 'Clearing...' : 'Clear Audit Flag'}</span>
+                <ShieldCheck className="w-3.5 h-3.5 stroke-[2.25]" />
+                <span>Quick-Clear Flagged SKU</span>
               </button>
             )}
             <button
@@ -297,6 +409,137 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
             </button>
           </div>
         </div>
+
+        {/* Flagged SKU Inline Quick-Clear Banner & Resolved Note Composer */}
+        {!skuSafety.isSafe && (
+          <div
+            id="quick-clear-flagged-banner"
+            className="px-4 sm:px-5 py-3 bg-rose-950/35 border-b border-rose-500/35 space-y-2.5"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div className="flex items-center gap-2 min-w-0">
+                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                <span className="text-rose-200 font-semibold">
+                  Active Audit Flag: <strong className="text-white">{skuSafety.statusLabel}</strong>
+                </span>
+                <span className="text-[11px] font-mono text-rose-300/80 hidden sm:inline">
+                  ({skuSafety.flaggedEntries.length} flagged entr{skuSafety.flaggedEntries.length === 1 ? 'y' : 'ies'})
+                </span>
+              </div>
+
+              {!isQuickClearOpen && (
+                <button
+                  type="button"
+                  id="banner-quick-clear-flagged-sku-btn"
+                  onClick={() => openQuickClearPanel(skuSafety.primaryFlaggedEntry)}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/45 text-[11px] font-semibold transition-colors cursor-pointer"
+                >
+                  <MessageSquarePlus className="w-3.5 h-3.5" />
+                  <span>Quick-Clear Flagged SKU</span>
+                </button>
+              )}
+            </div>
+
+            {isQuickClearOpen && (
+              <form
+                id="quick-clear-resolved-note-form"
+                onSubmit={handleConfirmQuickClear}
+                className="p-3 rounded-xl bg-neutral-950/90 border border-emerald-500/40 space-y-2.5"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <label
+                    htmlFor="quick-clear-resolved-note-input"
+                    className="text-xs font-semibold text-emerald-300 flex items-center gap-1.5"
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Append &lsquo;Resolved&rsquo; Note &amp; Update Status to Cleared</span>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsQuickClearOpen(false);
+                      setQuickClearTargetEntryId(null);
+                    }}
+                    className="text-[11px] text-neutral-400 hover:text-white cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                </div>
+
+                <textarea
+                  id="quick-clear-resolved-note-input"
+                  rows={2}
+                  value={resolvedNoteInput}
+                  onChange={e => setResolvedNoteInput(e.target.value)}
+                  placeholder="Resolved: Enter verification details to clear quarantine or damage status..."
+                  required
+                  className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-xs text-white placeholder:text-neutral-500 focus:outline-none focus:ring-1 focus:ring-emerald-500 resize-none"
+                />
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-[10px] text-neutral-500">Quick presets:</span>
+                  {RESOLVED_NOTE_PRESETS.map((preset, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => setResolvedNoteInput(preset)}
+                      className="text-[10px] px-2 py-0.5 rounded-md bg-neutral-900 hover:bg-neutral-800 text-neutral-300 border border-neutral-700 transition-colors cursor-pointer truncate max-w-[230px]"
+                      title={preset}
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="flex items-center justify-between gap-2 pt-1">
+                  <span className="text-[10px] font-mono text-neutral-400">
+                    Clearing as: <strong className="text-neutral-200">{userProfile?.displayName || 'Warehouse Manager'}</strong>
+                  </span>
+                  <button
+                    type="submit"
+                    id="confirm-quick-clear-sku-btn"
+                    disabled={isClearingFlag || !resolvedNoteInput.trim()}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-neutral-950 font-bold text-xs transition-all cursor-pointer active:scale-95"
+                  >
+                    {isClearingFlag ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Updating Status...</span>
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 className="w-3.5 h-3.5 stroke-[2.25]" />
+                        <span>Save Resolved Note &amp; Mark Cleared</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        )}
+
+        {/* Confirmation Banner After Quick-Clear Succeeds */}
+        {justClearedInfo && skuSafety.isSafe && (
+          <div
+            id="quick-clear-success-banner"
+            className="px-4 sm:px-5 py-2.5 bg-emerald-950/50 border-b border-emerald-500/40 flex items-center justify-between gap-2 text-xs text-emerald-200"
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span className="truncate">
+                <strong className="text-emerald-300">Audit Status Updated to Cleared</strong> — {justClearedInfo.note}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setJustClearedInfo(null)}
+              className="text-[11px] text-emerald-300 hover:text-white shrink-0 cursor-pointer"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
 
         {/* Quick Metrics Bar */}
         <div className="p-3 sm:px-5 bg-neutral-950/40 border-b border-neutral-800/80 grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
@@ -483,6 +726,14 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
             filteredLogs.map((entry, index) => {
               const isPositive = entry.adjustmentValue > 0;
               const isNegative = entry.adjustmentValue < 0;
+              const entryFlag = isAuditEntryQuarantineOrDamaged(entry);
+              const isClearanceRecord =
+                isAuditEntryDamagedClearance(entry) || isAuditEntryQuarantineClearance(entry);
+              const isActivelyFlaggedEntry =
+                entryFlag.isFlagged && activeFlaggedEntryIds.has(entry.id);
+              const isPreviouslyClearedFlag =
+                entryFlag.isFlagged && !activeFlaggedEntryIds.has(entry.id);
+
               const formattedDate = new Date(entry.timestamp).toLocaleString('en-US', {
                 month: 'short',
                 day: 'numeric',
@@ -496,11 +747,17 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
                 <div
                   key={`${entry.id}-${index}`}
                   id={`audit-log-entry-${entry.id}`}
-                  className="p-3.5 sm:p-4 rounded-xl bg-neutral-950 border border-neutral-800/90 hover:border-neutral-700 transition-all space-y-3 shadow-xs"
+                  className={`p-3.5 sm:p-4 rounded-xl border transition-all space-y-3 shadow-xs ${
+                    isActivelyFlaggedEntry
+                      ? 'bg-rose-950/20 border-rose-500/45 hover:border-rose-400/70'
+                      : isClearanceRecord
+                      ? 'bg-emerald-950/20 border-emerald-500/40 hover:border-emerald-400/60'
+                      : 'bg-neutral-950 border-neutral-800/90 hover:border-neutral-700'
+                  }`}
                 >
-                  {/* Row 1: Adjustment Value + Operator ID + Timestamp */}
+                  {/* Row 1: Adjustment Value + Flag/Cleared Status + Timestamp */}
                   <div className="flex items-start justify-between gap-2 flex-wrap">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       {/* Adjustment Value Badge */}
                       <span
                         className={`inline-flex items-center gap-1 font-mono font-bold text-xs px-2.5 py-1 rounded-lg border ${
@@ -533,6 +790,26 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
                           {entry.newStock}
                         </span>
                       </div>
+
+                      {/* Quarantine / Damage / Cleared Status Pill */}
+                      {isActivelyFlaggedEntry && (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-mono font-bold uppercase px-2 py-0.5 rounded-md bg-rose-500/20 text-rose-300 border border-rose-500/45">
+                          <AlertTriangle className="w-3 h-3 text-rose-400" />
+                          <span>{entryFlag.statusLabel}</span>
+                        </span>
+                      )}
+                      {isPreviouslyClearedFlag && (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-mono font-semibold uppercase px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-300 border border-emerald-500/35">
+                          <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                          <span>{entryFlag.statusLabel} · Cleared</span>
+                        </span>
+                      )}
+                      {isClearanceRecord && (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-mono font-bold uppercase px-2 py-0.5 rounded-md bg-emerald-500/20 text-emerald-300 border border-emerald-500/45">
+                          <ShieldCheck className="w-3 h-3 text-emerald-400" />
+                          <span>Cleared</span>
+                        </span>
+                      )}
                     </div>
 
                     {/* Timestamp */}
@@ -588,6 +865,28 @@ export const SkuAuditLogModal: React.FC<SkuAuditLogModalProps> = ({
                     <div className="text-[11px] text-neutral-400 bg-neutral-900/60 p-2 rounded-lg border border-neutral-850">
                       <span className="text-neutral-500 font-mono mr-1">Audit Note:</span>
                       {entry.notes}
+                    </div>
+                  )}
+
+                  {/* Per-Entry Quick-Clear Action for Active Quarantine / Damage Flags */}
+                  {isActivelyFlaggedEntry && (
+                    <div className="pt-2 border-t border-rose-500/25 flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-[11px] text-rose-300/90">
+                        Flagged entry requires manager resolution to restore Cleared status.
+                      </span>
+                      <button
+                        type="button"
+                        id={`quick-clear-entry-btn-${entry.id}`}
+                        onClick={() => openQuickClearPanel(entry)}
+                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer active:scale-95 ${
+                          quickClearTargetEntryId === entry.id && isQuickClearOpen
+                            ? 'bg-emerald-500/25 text-emerald-200 border border-emerald-400/60'
+                            : 'bg-emerald-500 hover:bg-emerald-400 text-neutral-950 shadow-xs'
+                        }`}
+                      >
+                        <ShieldCheck className="w-3.5 h-3.5 stroke-[2.25]" />
+                        <span>Quick-Clear Flagged SKU</span>
+                      </button>
                     </div>
                   )}
                 </div>
